@@ -1,0 +1,33 @@
+// prisma/schema.prisma
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "cockroachdb"
+  url      = env("DATABASE_URL")
+}
+
+model Entity {
+  id         String   @default(cuid()) @db.Uuid
+  entityType String   @map("entity_type") @db.Text
+  worldId    Int      @map("world_id")
+  attributes Json
+  rankScores Json?    @map("rank_scores") // JSONB key-value map for ranking
+  createdAt  DateTime @default(now()) @map("created_at")
+  updatedAt  DateTime @updatedAt @map("updated_at")
+
+  // Composite primary key for efficient lookups
+  @@id([entityType, id])
+  
+  // Index for name-based queries within entity type
+  @@index([entityType, attributes(ops: JsonbPathOps)], name: "idx_entity_type_name")
+  
+  // Index for rank scores by entity type and world
+  @@index([entityType, worldId, rankScores(ops: JsonbPathOps)], name: "idx_entity_type_world_ranks")
+  
+  // GIN index for efficient JSONB queries on rank scores
+  @@index([rankScores], type: Gin)
+  
+  @@map("entities")
+}
