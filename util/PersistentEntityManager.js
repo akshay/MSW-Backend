@@ -1,5 +1,6 @@
 // src/entities/PersistentEntityManager.js
 import { prisma } from '../config.js';
+import { InputValidator } from './InputValidator.js';
 
 export class PersistentEntityManager {
   constructor(cacheManager, streamManager) {
@@ -154,11 +155,11 @@ export class PersistentEntityManager {
     const batchSize = 150; // Increased batch size for better throughput
     const updateEntries = Array.from(mergedUpdates.values());
     const streamUpdates = []; // Collect stream updates
-    
+
     for (let i = 0; i < updateEntries.length; i += batchSize) {
       const batch = updateEntries.slice(i, i + batchSize);
-      
-      // Prepare batch data for the function
+
+      // Prepare batch data for the function with input validation
       const batchData = batch.map(({ entityType, entityId, worldId, attributes, rankScores }) => {
         const entityData = {
           entity_type: entityType,
@@ -172,19 +173,42 @@ export class PersistentEntityManager {
           entityData.rank_scores = rankScores;
         }
 
-        // Prepare stream update
+        // Prepare stream update (only include non-null-marker values)
         const streamId = `entity:${entityType}:${worldId}:${entityId}`;
+        const streamData = {};
+
+        // Add attributes to stream (excluding NULL_MARKER values)
+        for (const [key, value] of Object.entries(attributes)) {
+          if (!InputValidator.isNullMarker(value)) {
+            streamData[key] = value;
+          }
+        }
+
+        // Add rank scores to stream (excluding NULL_MARKER values)
+        if (rankScores) {
+          for (const [key, value] of Object.entries(rankScores)) {
+            if (!InputValidator.isNullMarker(value)) {
+              streamData[key] = value;
+            }
+          }
+        }
+
         streamUpdates.push({
           streamId,
-          data: { ...attributes, ...rankScores }
+          data: streamData
         });
 
         return entityData;
       });
 
-      // Execute batch upsert using the database function
+      // Validate and sanitize batch data before SQL execution
+      // This will process NULL_MARKER and separate keys to remove
+      const sanitizedBatchData = InputValidator.sanitizeBatchData(batchData);
+
+      // Execute batch upsert using the database function with sanitized data
+      const batchDataJson = JSON.stringify(sanitizedBatchData);
       await this.prisma.$queryRaw`
-        SELECT batch_upsert_entities_partial(${JSON.stringify(batchData)}::JSONB)
+        SELECT batch_upsert_entities_partial(${batchDataJson}::JSONB)
       `;
 
       // Batch invalidate cache for this batch
@@ -211,8 +235,15 @@ export class PersistentEntityManager {
       limit = 100
     } = options;
 
-    const cacheKey = `rankings:${entityType}:${worldId}:${rankKey}:${sortOrder}:${limit}`;
-    
+    // Validate all inputs before SQL execution
+    const sanitizedEntityType = InputValidator.sanitizeEntityType(entityType);
+    const sanitizedWorldId = InputValidator.sanitizeWorldId(worldId);
+    const sanitizedRankKey = InputValidator.sanitizeRankKey(rankKey);
+    const sanitizedSortOrder = InputValidator.sanitizeSortOrder(sortOrder);
+    const sanitizedLimit = InputValidator.sanitizeLimit(limit);
+
+    const cacheKey = `rankings:${sanitizedEntityType}:${sanitizedWorldId}:${sanitizedRankKey}:${sanitizedSortOrder}:${sanitizedLimit}`;
+
     // Try cache first
     let rankings = await this.cache.get(cacheKey);
     if (rankings) {
@@ -223,11 +254,11 @@ export class PersistentEntityManager {
     try {
       const entities = await this.prisma.$queryRaw`
         SELECT * FROM get_ranked_entities(
-          ${entityType}::TEXT,
-          ${worldId}::INT,
-          ${rankKey}::TEXT,
-          ${sortOrder}::TEXT,
-          ${limit}::INT
+          ${sanitizedEntityType}::TEXT,
+          ${sanitizedWorldId}::INT,
+          ${sanitizedRankKey}::TEXT,
+          ${sanitizedSortOrder}::TEXT,
+          ${sanitizedLimit}::INT
         )
       `;
 
@@ -251,8 +282,14 @@ export class PersistentEntityManager {
 
   // Optimized entity rank calculation with caching
   async calculateEntityRank(entityType, worldId, entityId, rankKey) {
-    const cacheKey = `rank:${entityType}:${worldId}:${entityId}:${rankKey}`;
-    
+    // Validate all inputs before SQL execution
+    const sanitizedEntityType = InputValidator.sanitizeEntityType(entityType);
+    const sanitizedWorldId = InputValidator.sanitizeWorldId(worldId);
+    const sanitizedEntityId = InputValidator.sanitizeEntityId(entityId);
+    const sanitizedRankKey = InputValidator.sanitizeRankKey(rankKey);
+
+    const cacheKey = `rank:${sanitizedEntityType}:${sanitizedWorldId}:${sanitizedEntityId}:${sanitizedRankKey}`;
+
     // Try cache first with longer TTL
     let rankInfo = await this.cache.get(cacheKey);
     if (rankInfo) {
@@ -263,23 +300,23 @@ export class PersistentEntityManager {
       // Single optimized query to get both entity score and rank
       const result = await this.prisma.$queryRaw`
         WITH entity_score AS (
-          SELECT (rank_scores->>${rankKey})::FLOAT as score
+          SELECT (rank_scores->>${sanitizedRankKey})::FLOAT as score
           FROM entities
-          WHERE entity_type = ${entityType}
-            AND id = ${entityId}
-            AND world_id = ${worldId}
-            AND rank_scores ? ${rankKey}
+          WHERE entity_type = ${sanitizedEntityType}
+            AND id = ${sanitizedEntityId}
+            AND world_id = ${sanitizedWorldId}
+            AND rank_scores ? ${sanitizedRankKey}
         ),
         rank_calculation AS (
-          SELECT 
-            COUNT(*) FILTER (WHERE (e.rank_scores->>${rankKey})::FLOAT > es.score) + 1 as rank,
+          SELECT
+            COUNT(*) FILTER (WHERE (e.rank_scores->>${sanitizedRankKey})::FLOAT > es.score) + 1 as rank,
             COUNT(*) as total_entities
           FROM entities e, entity_score es
-          WHERE e.entity_type = ${entityType}
-            AND e.world_id = ${worldId}
-            AND e.rank_scores ? ${rankKey}
+          WHERE e.entity_type = ${sanitizedEntityType}
+            AND e.world_id = ${sanitizedWorldId}
+            AND e.rank_scores ? ${sanitizedRankKey}
         )
-        SELECT 
+        SELECT
           es.score,
           rc.rank,
           rc.total_entities
@@ -301,27 +338,27 @@ export class PersistentEntityManager {
       const { score, rank, total_entities } = result[0];
 
       const rankInfo = {
-        entityId,
-        entityType,
-        worldId,
-        rankKey,
+        entityId: sanitizedEntityId,
+        entityType: sanitizedEntityType,
+        worldId: sanitizedWorldId,
+        rankKey: sanitizedRankKey,
         score: parseFloat(score),
         rank: parseInt(rank),
         totalEntities: parseInt(total_entities)
       };
 
       // Cache with longer TTL
-      await this.cache.set(cacheKey, rankInfo, 600, [`${entityType}:${entityId}`]);
+      await this.cache.set(cacheKey, rankInfo, 600, [`${sanitizedEntityType}:${sanitizedEntityId}`]);
 
       return rankInfo;
 
     } catch (error) {
       console.error('Calculate entity rank failed:', error);
       return {
-        entityId,
-        entityType,
-        worldId,
-        rankKey,
+        entityId: sanitizedEntityId,
+        entityType: sanitizedEntityType,
+        worldId: sanitizedWorldId,
+        rankKey: sanitizedRankKey,
         score: null,
         rank: null,
         totalEntities: 0,
@@ -332,10 +369,16 @@ export class PersistentEntityManager {
 
   // Optimized name search with better indexing
   async searchByName(entityType, namePattern, worldId = null, limit = 100) {
-    const cacheKey = worldId 
-      ? `search:${entityType}:${worldId}:${namePattern}:${limit}`
-      : `search:${entityType}:all:${namePattern}:${limit}`;
-    
+    // Validate all inputs before SQL execution
+    const sanitizedEntityType = InputValidator.sanitizeEntityType(entityType);
+    const sanitizedNamePattern = InputValidator.sanitizeNamePattern(namePattern);
+    const sanitizedWorldId = worldId !== null ? InputValidator.sanitizeWorldId(worldId) : null;
+    const sanitizedLimit = InputValidator.sanitizeLimit(limit);
+
+    const cacheKey = sanitizedWorldId
+      ? `search:${sanitizedEntityType}:${sanitizedWorldId}:${sanitizedNamePattern}:${sanitizedLimit}`
+      : `search:${sanitizedEntityType}:all:${sanitizedNamePattern}:${sanitizedLimit}`;
+
     let entities = await this.cache.get(cacheKey);
     if (entities) {
       return entities;
@@ -344,10 +387,10 @@ export class PersistentEntityManager {
     try {
       const entities = await this.prisma.$queryRaw`
         SELECT * FROM get_entities_by_name(
-          ${entityType}::TEXT,
-          ${worldId}::INT,
-          ${namePattern}::TEXT,
-          ${limit}::INT
+          ${sanitizedEntityType}::TEXT,
+          ${sanitizedWorldId}::INT,
+          ${sanitizedNamePattern}::TEXT,
+          ${sanitizedLimit}::INT
         )
       `;
 

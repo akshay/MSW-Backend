@@ -2,8 +2,9 @@
 import express from 'express';
 import cors from 'cors';
 import helmet from 'helmet';
-import { config } from './config/index.js';
+import { config, ephemeralRedis, streamRedis } from './config.js';
 import { CommandProcessor } from './processors/CommandProcessor.js';
+import { rateLimiter } from './middleware/rateLimiter.js';
 
 const app = express();
 const commandProcessor = new CommandProcessor();
@@ -13,6 +14,9 @@ app.use(helmet());
 app.use(cors());
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
+
+// Rate limiting middleware - must be after body parsers
+app.use(rateLimiter.middleware());
 
 // Health check endpoint
 // src/server.js - Updated health check

@@ -53,6 +53,6 @@ export const config = {
   // Entity type configuration
   entityTypes: {
     persistent: ['Account', 'Guild', 'Alliance', 'Party', 'PlayerCharacter'],
-    ephemeral: ['OnlineMapData']
+    ephemeral: ['OnlineMapData', 'Channel', 'World']
   }
 };

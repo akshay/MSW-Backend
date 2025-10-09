@@ -1,5 +1,6 @@
 // src/entities/EphemeralEntityManager.js
 import { ephemeralRedis } from '../config.js';
+import { InputValidator } from './InputValidator.js';
 
 export class EphemeralEntityManager {
   constructor(streamManager) {
@@ -57,19 +58,35 @@ export class EphemeralEntityManager {
           const key = batchKeys[batchIndex];
           const exists = batchExists[batchIndex];
 
-          // Prepare stream update data
+          // Separate attributes into updates and removals
+          const attributesToSet = {};
+          const attributesToRemove = [];
+          const streamData = {};
+
+          Object.entries(attributes).forEach(([field, value]) => {
+            if (InputValidator.isNullMarker(value)) {
+              // Mark for removal
+              attributesToRemove.push(field);
+            } else {
+              // Mark for set
+              attributesToSet[field] = value;
+              streamData[field] = value;
+            }
+          });
+
+          // Prepare stream update data (excluding NULL_MARKER values)
           streamUpdates.push({
             streamId: key, // Use cache key as streamId
-            data: attributes
+            data: streamData
           });
 
           if (!exists) {
-            // Create new entity
+            // Create new entity (ignore NULL_MARKER values - nothing to remove yet)
             const newEntity = {
               id: entityId,
               entityType,
               worldId,
-              attributes,
+              attributes: attributesToSet,
               lastWrite: timestamp,
               type: 'ephemeral'
             };
@@ -78,8 +95,15 @@ export class EphemeralEntityManager {
             pipeline.expire(key, 300);
           } else {
             // Update existing entity attributes atomically
-            Object.entries(attributes).forEach(([field, value]) => {
+
+            // Set new/updated attributes
+            Object.entries(attributesToSet).forEach(([field, value]) => {
               pipeline.call('JSON.SET', key, `$.attributes.${field}`, JSON.stringify(value));
+            });
+
+            // Remove attributes marked with NULL_MARKER
+            attributesToRemove.forEach(field => {
+              pipeline.call('JSON.DEL', key, `$.attributes.${field}`);
             });
 
             // Update worldId and timestamp
