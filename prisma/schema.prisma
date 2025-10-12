@@ -14,20 +14,24 @@ model Entity {
   worldId    Int      @map("world_id")
   attributes Json
   rankScores Json?    @map("rank_scores") // JSONB key-value map for ranking
+  version    Int      @default(1) // Version number for entity, incremented on each update
   createdAt  DateTime @default(now()) @map("created_at")
   updatedAt  DateTime @updatedAt @map("updated_at")
 
   // Composite primary key for efficient lookups
   @@id([entityType, id])
-  
+
   // Index for name-based queries within entity type
   @@index([entityType, attributes(ops: JsonbPathOps)], name: "idx_entity_type_name")
-  
+
   // Index for rank scores by entity type and world
   @@index([entityType, worldId, rankScores(ops: JsonbPathOps)], name: "idx_entity_type_world_ranks")
-  
+
   // GIN index for efficient JSONB queries on rank scores
   @@index([rankScores], type: Gin)
-  
+
+  // Index for version-based queries
+  @@index([entityType, id, version], name: "idx_entity_version")
+
   @@map("entities")
 }

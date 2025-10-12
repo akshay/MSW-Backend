@@ -10,8 +10,62 @@ export class PersistentEntityManager {
   }
 
   // Generate cache key (worldId always included)
-  getCacheKey(entityType, entityId, worldId) {
+  // If version is provided, include it in the cache key
+  getCacheKey(entityType, entityId, worldId, version = null) {
+    if (version !== null) {
+      return `entity:${entityType}:${worldId}:${entityId}:v${version}`;
+    }
     return `entity:${entityType}:${worldId}:${entityId}`;
+  }
+
+  // Compute the difference between two entity versions
+  // Returns only the attributes and rankScores that changed
+  computeEntityDiff(oldEntity, newEntity) {
+    if (!oldEntity) {
+      return newEntity;
+    }
+
+    const diff = {
+      ...newEntity,
+      attributes: {},
+      rankScores: {}
+    };
+
+    // Compare attributes
+    const oldAttrs = oldEntity.attributes || {};
+    const newAttrs = newEntity.attributes || {};
+
+    for (const [key, value] of Object.entries(newAttrs)) {
+      if (JSON.stringify(oldAttrs[key]) !== JSON.stringify(value)) {
+        diff.attributes[key] = value;
+      }
+    }
+
+    // Check for deleted attributes
+    for (const key of Object.keys(oldAttrs)) {
+      if (!(key in newAttrs)) {
+        diff.attributes[key] = InputValidator.NULL_MARKER;
+      }
+    }
+
+    // Compare rankScores
+    const oldRanks = oldEntity.rankScores || {};
+    const newRanks = newEntity.rankScores || {};
+
+    for (const [key, value] of Object.entries(newRanks)) {
+      if (JSON.stringify(oldRanks[key]) !== JSON.stringify(value)) {
+        diff.rankScores[key] = value;
+      }
+    }
+
+    // Check for deleted rank scores
+    for (const key of Object.keys(oldRanks)) {
+      if (!(key in newRanks)) {
+        diff.rankScores[key] = InputValidator.NULL_MARKER;
+      }
+    }
+
+    return diff;
   }
 
   async batchLoad(requests) {
@@ -23,32 +77,51 @@ export class PersistentEntityManager {
     const requestIndexMap = new Map();
 
     requests.forEach((request, index) => {
-      const { entityType, entityId, worldId } = request;
-      const cacheKey = this.getCacheKey(entityType, entityId, worldId);
+      const { entityType, entityId, worldId, version = 0 } = request;
+      const newestCacheKey = this.getCacheKey(entityType, entityId, worldId);
+      const versionedCacheKey = version > 0 ? this.getCacheKey(entityType, entityId, worldId, version) : null;
       const groupKey = `${entityType}:${worldId}`;
-      
-      cacheKeys.push(cacheKey);
-      requestIndexMap.set(index, { cacheKey, request });
-      
+
+      // Always check the newest version
+      cacheKeys.push(newestCacheKey);
+
+      // Also check versioned cache if version is specified
+      if (versionedCacheKey) {
+        cacheKeys.push(versionedCacheKey);
+      }
+
+      requestIndexMap.set(index, {
+        newestCacheKey,
+        versionedCacheKey,
+        request
+      });
+
       if (!requestGroups.has(groupKey)) {
         requestGroups.set(groupKey, []);
       }
       requestGroups.get(groupKey).push({ ...request, index });
     });
 
-    // Batch check cache for all entities
+    // Batch check cache for all entities (newest + versioned)
     const cacheResults = await this.cache.mget(cacheKeys);
     const resultMap = new Map();
     const cacheMisses = [];
 
     requests.forEach((request, index) => {
-      const { cacheKey } = requestIndexMap.get(index);
-      const cached = cacheResults.get(cacheKey);
-      
-      if (cached) {
-        resultMap.set(index, cached);
+      const { newestCacheKey, versionedCacheKey } = requestIndexMap.get(index);
+      const newestCached = cacheResults.get(newestCacheKey);
+      const versionedCached = versionedCacheKey ? cacheResults.get(versionedCacheKey) : null;
+
+      if (newestCached) {
+        // If we have both versions, compute the diff
+        if (versionedCached && request.version > 0) {
+          const diff = this.computeEntityDiff(versionedCached, newestCached);
+          resultMap.set(index, diff);
+        } else {
+          resultMap.set(index, newestCached);
+        }
       } else {
-        cacheMisses.push({ ...request, index });
+        cacheMisses.push({ ...request, index, versionedCached });
       }
     });
 
@@ -71,10 +144,10 @@ export class PersistentEntityManager {
 
         try {
           const dbEntities = await this.prisma.entity.findMany({
-            where: { 
-              entityType, 
-              id: { in: entityIds }, 
-              worldId 
+            where: {
+              entityType,
+              id: { in: entityIds },
+              worldId
             }
           });
 
@@ -89,18 +162,30 @@ export class PersistentEntityManager {
 
       // Process all group results and update cache
       const allCacheEntries = [];
-      
+
       groupResults.forEach(({ misses, dbEntities }) => {
         dbEntities.forEach(entity => {
           const matchingMiss = misses.find(miss => miss.entityId === entity.id);
-          
+
           if (matchingMiss) {
-            const cacheKey = this.getCacheKey(entity.entityType, entity.id, entity.worldId);
-            allCacheEntries.push([cacheKey, entity]);
-            resultMap.set(matchingMiss.index, entity);
-            
+            // Cache the newest version (without version in key)
+            const newestCacheKey = this.getCacheKey(entity.entityType, entity.id, entity.worldId);
+            allCacheEntries.push([newestCacheKey, entity]);
+
+            // Also cache the versioned entity (with version in key)
+            const versionedCacheKey = this.getCacheKey(entity.entityType, entity.id, entity.worldId, entity.version);
+            allCacheEntries.push([versionedCacheKey, entity]);
+
+            // Compute diff if we have a versioned entity from earlier
+            if (matchingMiss.versionedCached && matchingMiss.version > 0) {
+              const diff = this.computeEntityDiff(matchingMiss.versionedCached, entity);
+              resultMap.set(matchingMiss.index, diff);
+            } else {
+              resultMap.set(matchingMiss.index, entity);
+            }
+
             // Track dependencies
-            this.cache.trackDependencies(cacheKey, [`${entity.entityType}:${entity.id}`]);
+            this.cache.trackDependencies(newestCacheKey, [`${entity.entityType}:${entity.id}`]);
           }
         });
       });
