@@ -1,6 +1,6 @@
 // middleware/rateLimiter.js
 import { cacheRedis } from '../config.js';
-import { InputValidator } from '../util/InputValidator.js';
+import { InputValidator } from './InputValidator.js';
 
 /**
  * Rate Limiter Middleware

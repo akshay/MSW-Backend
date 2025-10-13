@@ -23,7 +23,7 @@ const mockPersistentManager = {
 };
 
 // Mock the classes that CommandProcessor imports first
-jest.mock('../cloud/util/StreamManager.js', () => ({
+jest.mock('../util/StreamManager.js', () => ({
   StreamManager: jest.fn(() => ({
     batchAddToStreams: jest.fn(),
     batchAddMessages: jest.fn(),
@@ -31,21 +31,21 @@ jest.mock('../cloud/util/StreamManager.js', () => ({
   }))
 }));
 
-jest.mock('../cloud/util/EphemeralEntityManager.js', () => ({
+jest.mock('../util/EphemeralEntityManager.js', () => ({
   EphemeralEntityManager: jest.fn(() => ({
     batchLoad: jest.fn(),
     batchSavePartial: jest.fn()
   }))
 }));
 
-jest.mock('../cloud/util/PersistentEntityManager.js', () => ({
+jest.mock('../util/PersistentEntityManager.js', () => ({
   PersistentEntityManager: jest.fn(() => ({
     batchLoad: jest.fn(),
     batchSavePartial: jest.fn()
   }))
 }));
 
-jest.mock('../cloud/config.js', () => ({
+jest.mock('../config.js', () => ({
   config: {
     entityTypes: {
       ephemeral: ['session', 'temporary_data']
@@ -54,7 +54,7 @@ jest.mock('../cloud/config.js', () => ({
 }));
 
 // Mock HybridCacheManager
-jest.mock('../cloud/util/HybridCacheManager.js', () => ({
+jest.mock('../util/HybridCacheManager.js', () => ({
   HybridCacheManager: jest.fn(() => ({
     get: jest.fn(),
     set: jest.fn()
@@ -559,16 +559,154 @@ describe('CommandProcessor', () => {
     });
   });
 
+  describe('processBatchedSearchByName', () => {
+    test('should handle empty array', async () => {
+      const result = await commandProcessor.processBatchedSearchByName([]);
+      expect(result).toEqual([]);
+    });
+
+    test('should process search commands', async () => {
+      const commands = [
+        { entityType: 'player', namePattern: 'John%', worldId: 1, limit: 10, originalIndex: 0 },
+        { entityType: 'player', namePattern: 'Jane%', worldId: 1, limit: 5, originalIndex: 1 }
+      ];
+
+      mockPersistentManager.searchByName = jest.fn()
+        .mockResolvedValueOnce([{ id: 'player1', name: 'John Doe' }])
+        .mockResolvedValueOnce([{ id: 'player2', name: 'Jane Smith' }]);
+
+      const result = await commandProcessor.processBatchedSearchByName(commands);
+
+      expect(result).toHaveLength(2);
+      expect(result[0]).toEqual({
+        originalIndex: 0,
+        type: 'search_by_name',
+        result: [{ id: 'player1', name: 'John Doe' }]
+      });
+      expect(result[1]).toEqual({
+        originalIndex: 1,
+        type: 'search_by_name',
+        result: [{ id: 'player2', name: 'Jane Smith' }]
+      });
+      expect(mockPersistentManager.searchByName).toHaveBeenCalledWith('player', 'John%', 1, 10);
+      expect(mockPersistentManager.searchByName).toHaveBeenCalledWith('player', 'Jane%', 1, 5);
+    });
+
+    test('should use default limit of 100 when not specified', async () => {
+      const commands = [
+        { entityType: 'player', namePattern: 'Test%', worldId: 1, originalIndex: 0 }
+      ];
+
+      mockPersistentManager.searchByName = jest.fn().mockResolvedValueOnce([]);
+
+      await commandProcessor.processBatchedSearchByName(commands);
+
+      expect(mockPersistentManager.searchByName).toHaveBeenCalledWith('player', 'Test%', 1, 100);
+    });
+  });
+
+  describe('processBatchedCalculateRank', () => {
+    test('should handle empty array', async () => {
+      const result = await commandProcessor.processBatchedCalculateRank([]);
+      expect(result).toEqual([]);
+    });
+
+    test('should process rank calculation commands', async () => {
+      const commands = [
+        { entityType: 'player', worldId: 1, entityId: 'player1', rankKey: 'level', originalIndex: 0 },
+        { entityType: 'player', worldId: 1, entityId: 'player2', rankKey: 'experience', originalIndex: 1 }
+      ];
+
+      mockPersistentManager.calculateEntityRank = jest.fn()
+        .mockResolvedValueOnce({ rank: 1, score: 100 })
+        .mockResolvedValueOnce({ rank: 5, score: 50 });
+
+      const result = await commandProcessor.processBatchedCalculateRank(commands);
+
+      expect(result).toHaveLength(2);
+      expect(result[0]).toEqual({
+        originalIndex: 0,
+        type: 'calculate_rank',
+        result: { rank: 1, score: 100 }
+      });
+      expect(result[1]).toEqual({
+        originalIndex: 1,
+        type: 'calculate_rank',
+        result: { rank: 5, score: 50 }
+      });
+      expect(mockPersistentManager.calculateEntityRank).toHaveBeenCalledWith('player', 1, 'player1', 'level');
+      expect(mockPersistentManager.calculateEntityRank).toHaveBeenCalledWith('player', 1, 'player2', 'experience');
+    });
+  });
+
+  describe('processBatchedGetRankings', () => {
+    test('should handle empty array', async () => {
+      const result = await commandProcessor.processBatchedGetRankings([]);
+      expect(result).toEqual([]);
+    });
+
+    test('should process get rankings commands', async () => {
+      const commands = [
+        { entityType: 'player', worldId: 1, rankKey: 'level', sortOrder: 'DESC', limit: 10, originalIndex: 0 },
+        { entityType: 'guild', worldId: 1, rankKey: 'power', sortOrder: 'ASC', limit: 20, originalIndex: 1 }
+      ];
+
+      mockPersistentManager.getRankedEntities = jest.fn()
+        .mockResolvedValueOnce([{ id: 'p1', rank: 1 }])
+        .mockResolvedValueOnce([{ id: 'g1', rank: 1 }]);
+
+      const result = await commandProcessor.processBatchedGetRankings(commands);
+
+      expect(result).toHaveLength(2);
+      expect(result[0]).toEqual({
+        originalIndex: 0,
+        type: 'get_rankings',
+        result: [{ id: 'p1', rank: 1 }]
+      });
+      expect(result[1]).toEqual({
+        originalIndex: 1,
+        type: 'get_rankings',
+        result: [{ id: 'g1', rank: 1 }]
+      });
+      expect(mockPersistentManager.getRankedEntities).toHaveBeenCalledWith('player', 1, 'level', {
+        sortOrder: 'DESC',
+        limit: 10
+      });
+      expect(mockPersistentManager.getRankedEntities).toHaveBeenCalledWith('guild', 1, 'power', {
+        sortOrder: 'ASC',
+        limit: 20
+      });
+    });
+
+    test('should use default sortOrder and limit when not specified', async () => {
+      const commands = [
+        { entityType: 'player', worldId: 1, rankKey: 'level', originalIndex: 0 }
+      ];
+
+      mockPersistentManager.getRankedEntities = jest.fn().mockResolvedValueOnce([]);
+
+      await commandProcessor.processBatchedGetRankings(commands);
+
+      expect(mockPersistentManager.getRankedEntities).toHaveBeenCalledWith('player', 1, 'level', {
+        sortOrder: 'DESC',
+        limit: 100
+      });
+    });
+  });
+
   describe('processCommands', () => {
     beforeEach(() => {
       // Mock validation and decryption
       jest.spyOn(commandProcessor, 'validateAndDecryptRequest').mockResolvedValue();
-      
+
       // Mock batch processing methods
       jest.spyOn(commandProcessor, 'processBatchedLoads').mockResolvedValue([]);
       jest.spyOn(commandProcessor, 'processBatchedSaves').mockResolvedValue([]);
       jest.spyOn(commandProcessor, 'processBatchedStreamAdds').mockResolvedValue([]);
       jest.spyOn(commandProcessor, 'processBatchedStreamPulls').mockResolvedValue([]);
+      jest.spyOn(commandProcessor, 'processBatchedSearchByName').mockResolvedValue([]);
+      jest.spyOn(commandProcessor, 'processBatchedCalculateRank').mockResolvedValue([]);
+      jest.spyOn(commandProcessor, 'processBatchedGetRankings').mockResolvedValue([]);
     });
 
     test('should process valid command payload', async () => {

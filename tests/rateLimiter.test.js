@@ -1,5 +1,5 @@
 // tests/rateLimiter.test.js
-import { RateLimiter } from '../middleware/rateLimiter.js';
+import { RateLimiter } from '../util/RateLimiter.js';
 import { cacheRedis } from '../config.js';
 
 describe('RateLimiter', () => {

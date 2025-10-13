@@ -14,6 +14,11 @@ process.env.DATABASE_URL = 'postgresql://test:test@localhost:5432/test';
 process.env.EPHEMERAL_REDIS_URL = 'redis://localhost:6379/0';
 process.env.STREAM_REDIS_URL = 'redis://localhost:6379/1';
 process.env.CACHE_REDIS_URL = 'redis://localhost:6379/2';
+process.env.RATE_LIMIT_WINDOW_MS = '60000'; // 1 minute
+process.env.RATE_LIMIT_MAX_REQUESTS = '200';
+process.env.CACHE_TTL_SECONDS = '60'; // 1 minute
+process.env.CACHE_MAX_SIZE = '5000';
+process.env.NODE_ENV = 'test';
 
 // Mock performance.now for consistent timing tests
 global.performance = {

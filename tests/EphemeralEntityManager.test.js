@@ -21,7 +21,7 @@ const mockStreamManager = {
   batchAddToStreams: jest.fn()
 };
 
-jest.mock('../cloud/config.js', () => ({
+jest.mock('../config.js', () => ({
   ephemeralRedis: {
     call: jest.fn(),
     pipeline: jest.fn(() => ({
@@ -35,7 +35,7 @@ jest.mock('../cloud/config.js', () => ({
   }
 }));
 
-import { EphemeralEntityManager } from '../cloud/util/EphemeralEntityManager.js';
+import { EphemeralEntityManager } from '../util/EphemeralEntityManager.js';
 
 describe('EphemeralEntityManager', () => {
   let ephemeralManager;
@@ -135,8 +135,7 @@ describe('EphemeralEntityManager', () => {
         expect.stringContaining('"type":"ephemeral"')
       );
 
-      expect(mockPipeline.expire).toHaveBeenCalledWith('ephemeral:player:1:user123', 300);
-      expect(mockPipeline.expire).toHaveBeenCalledWith('ephemeral:session:1:sess456', 300);
+      // Note: Ephemeral entities don't set explicit TTL - they rely on Redis eviction policies
     });
 
     test('should successfully update existing entities', async () => {

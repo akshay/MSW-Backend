@@ -9,7 +9,7 @@ jest.mock('@prisma/client', () => ({
 }));
 
 // Mock config to avoid Redis connection issues
-jest.mock('../cloud/config.js', () => ({
+jest.mock('../config.js', () => ({
   prisma: {
     entity: {
       findMany: jest.fn()
@@ -18,7 +18,7 @@ jest.mock('../cloud/config.js', () => ({
   }
 }));
 
-import { PersistentEntityManager } from '../cloud/util/PersistentEntityManager.js';
+import { PersistentEntityManager } from '../util/PersistentEntityManager.js';
 
 // Mock dependencies
 const mockCache = {
@@ -59,6 +59,116 @@ describe('PersistentEntityManager', () => {
     it('should handle different entity types', () => {
       const key = manager.getCacheKey('guild', 'guild456', 2);
       expect(key).toBe('entity:guild:2:guild456');
+    });
+
+    it('should generate versioned cache key when version is provided', () => {
+      const key = manager.getCacheKey('character', 'user123', 1, 5);
+      expect(key).toBe('entity:character:1:user123:v5');
+    });
+
+    it('should generate non-versioned cache key when version is null', () => {
+      const key = manager.getCacheKey('character', 'user123', 1, null);
+      expect(key).toBe('entity:character:1:user123');
+    });
+
+    it('should generate non-versioned cache key when version is not provided', () => {
+      const key = manager.getCacheKey('character', 'user123', 1);
+      expect(key).toBe('entity:character:1:user123');
+    });
+  });
+
+  describe('computeEntityDiff', () => {
+    it('should return full entity when old entity is null', () => {
+      const newEntity = {
+        id: 'user1',
+        attributes: { level: 10, exp: 100 },
+        rankScores: { combat: 50 }
+      };
+
+      const diff = manager.computeEntityDiff(null, newEntity);
+
+      expect(diff).toEqual(newEntity);
+    });
+
+    it('should return only changed attributes', () => {
+      const oldEntity = {
+        attributes: { level: 10, exp: 100, name: 'Player' },
+        rankScores: { combat: 50 }
+      };
+
+      const newEntity = {
+        attributes: { level: 11, exp: 150, name: 'Player' },
+        rankScores: { combat: 50 }
+      };
+
+      const diff = manager.computeEntityDiff(oldEntity, newEntity);
+
+      expect(diff.attributes).toEqual({ level: 11, exp: 150 });
+      expect(diff.rankScores).toEqual({});
+    });
+
+    it('should mark deleted attributes with NULL_MARKER', () => {
+      const oldEntity = {
+        attributes: { level: 10, exp: 100, temp: 'data' },
+        rankScores: {}
+      };
+
+      const newEntity = {
+        attributes: { level: 10, exp: 100 },
+        rankScores: {}
+      };
+
+      const diff = manager.computeEntityDiff(oldEntity, newEntity);
+
+      expect(diff.attributes.temp).toBe('$$__NULL__$$');
+    });
+
+    it('should handle changed rank scores', () => {
+      const oldEntity = {
+        attributes: {},
+        rankScores: { combat: 50, magic: 30 }
+      };
+
+      const newEntity = {
+        attributes: {},
+        rankScores: { combat: 60, magic: 30 }
+      };
+
+      const diff = manager.computeEntityDiff(oldEntity, newEntity);
+
+      expect(diff.rankScores).toEqual({ combat: 60 });
+    });
+
+    it('should mark deleted rank scores with NULL_MARKER', () => {
+      const oldEntity = {
+        attributes: {},
+        rankScores: { combat: 50, magic: 30 }
+      };
+
+      const newEntity = {
+        attributes: {},
+        rankScores: { combat: 50 }
+      };
+
+      const diff = manager.computeEntityDiff(oldEntity, newEntity);
+
+      expect(diff.rankScores.magic).toBe('$$__NULL__$$');
+    });
+
+    it('should handle complex nested objects', () => {
+      const oldEntity = {
+        attributes: { config: { setting1: true, setting2: false } },
+        rankScores: {}
+      };
+
+      const newEntity = {
+        attributes: { config: { setting1: true, setting2: true } },
+        rankScores: {}
+      };
+
+      const diff = manager.computeEntityDiff(oldEntity, newEntity);
+
+      expect(diff.attributes.config).toEqual({ setting1: true, setting2: true });
     });
   });
 
@@ -112,7 +222,8 @@ describe('PersistentEntityManager', () => {
         where: {
           entityType: 'character',
           id: { in: ['user1'] },
-          worldId: 1
+          worldId: 1,
+          isDeleted: false
         }
       });
     });
@@ -128,6 +239,106 @@ describe('PersistentEntityManager', () => {
       const result = await manager.batchLoad(requests);
 
       expect(result).toEqual([null]);
+    });
+
+    it('should handle versioned loads with version parameter', async () => {
+      const requests = [
+        { entityType: 'character', entityId: 'user1', worldId: 1, version: 5 }
+      ];
+
+      const versionedEntity = {
+        id: 'user1',
+        version: 5,
+        attributes: { level: 10 },
+        rankScores: {}
+      };
+
+      const newestEntity = {
+        id: 'user1',
+        version: 7,
+        attributes: { level: 12, exp: 100 },
+        rankScores: {}
+      };
+
+      // Mock cache to return both versioned and newest entities
+      mockCache.mget.mockResolvedValue(new Map([
+        ['entity:character:1:user1:v5', versionedEntity],
+        ['entity:character:1:user1', newestEntity]
+      ]));
+
+      const result = await manager.batchLoad(requests);
+
+      expect(result).toHaveLength(1);
+      // Should return diff: only changed attributes (level and exp)
+      expect(result[0].attributes).toEqual({ level: 12, exp: 100 });
+      expect(mockCache.mget).toHaveBeenCalledWith([
+        'entity:character:1:user1',
+        'entity:character:1:user1:v5'
+      ]);
+    });
+
+    it('should load from database and compute diff for versioned requests', async () => {
+      const requests = [
+        { entityType: 'character', entityId: 'user1', worldId: 1, version: 3 }
+      ];
+
+      const versionedEntity = {
+        id: 'user1',
+        version: 3,
+        attributes: { level: 8 },
+        rankScores: {}
+      };
+
+      const newestEntity = {
+        id: 'user1',
+        entityType: 'character',
+        worldId: 1,
+        version: 5,
+        attributes: { level: 10, exp: 50 },
+        rankScores: {}
+      };
+
+      // Cache has versioned entity but not newest
+      mockCache.mget.mockResolvedValue(new Map([
+        ['entity:character:1:user1:v3', versionedEntity]
+      ]));
+
+      mockPrisma.entity.findMany.mockResolvedValue([newestEntity]);
+
+      const result = await manager.batchLoad(requests);
+
+      expect(result).toHaveLength(1);
+      // Should return diff
+      expect(result[0].attributes).toEqual({ level: 10, exp: 50 });
+      expect(mockPrisma.entity.findMany).toHaveBeenCalled();
+    });
+
+    it('should cache both newest and versioned entities after loading', async () => {
+      const requests = [
+        { entityType: 'character', entityId: 'user1', worldId: 1 }
+      ];
+
+      mockCache.mget.mockResolvedValue(new Map());
+      mockPrisma.entity.findMany.mockResolvedValue([
+        {
+          id: 'user1',
+          entityType: 'character',
+          worldId: 1,
+          version: 5,
+          attributes: { level: 10 }
+        }
+      ]);
+
+      await manager.batchLoad(requests);
+
+      // Should cache both newest and versioned
+      expect(mockCache.mset).toHaveBeenCalledWith(
+        expect.arrayContaining([
+          ['entity:character:1:user1', expect.any(Object)],
+          ['entity:character:1:user1:v5', expect.any(Object)]
+        ]),
+        300
+      );
     });
   });
 

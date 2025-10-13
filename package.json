@@ -9,9 +9,9 @@
     "test:watch": "jest --watch",
     "test:coverage": "jest --coverage",
     "benchmark": "node scripts/benchmark.js",
-    "db:generate": "prisma generate --schema ./cloud/prisma/schema.prisma",
-    "db:push": "prisma db push --schema ./cloud/prisma/schema.prisma",
-    "db:migrate": "prisma migrate dev --schema ./cloud/prisma/schema.prisma"
+    "db:generate": "prisma generate --schema ./prisma/schema.prisma",
+    "db:push": "prisma db push --schema ./prisma/schema.prisma",
+    "db:migrate": "prisma migrate dev --schema ./prisma/schema.prisma"
   },
   "dependencies": {
     "@prisma/client": "^5.7.0",

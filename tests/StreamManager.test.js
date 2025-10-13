@@ -18,7 +18,7 @@ const mockRedis = {
   expire: jest.fn()
 };
 
-jest.mock('../cloud/config.js', () => ({
+jest.mock('../config.js', () => ({
   streamRedis: {
     pipeline: jest.fn(() => ({
       xadd: jest.fn().mockReturnThis(),
@@ -31,10 +31,11 @@ jest.mock('../cloud/config.js', () => ({
     xadd: jest.fn(),
     xrange: jest.fn(),
     expire: jest.fn()
-  }
+  },
+  cacheTTL: 300 // Mock the cacheTTL export
 }));
 
-import { StreamManager } from '../cloud/util/StreamManager.js';
+import { StreamManager } from '../util/StreamManager.js';
 
 describe('StreamManager', () => {
   let streamManager;
@@ -49,7 +50,7 @@ describe('StreamManager', () => {
   describe('constructor', () => {
     test('should initialize with correct properties', () => {
       expect(streamManager.redis).toBeDefined();
-      expect(streamManager.worldInstanceTTL).toBe(5);
+      expect(streamManager.worldInstanceTTL).toBe(3); // 300 / 100 = 3
     });
   });
 
@@ -119,8 +120,8 @@ describe('StreamManager', () => {
 
       // Verify that stream1 gets 2 messages and stream2 gets 1
       expect(mockPipeline.xadd).toHaveBeenCalledTimes(3);
-      expect(mockPipeline.expire).toHaveBeenCalledWith('stream:stream1', 60);
-      expect(mockPipeline.expire).toHaveBeenCalledWith('stream:stream2', 60);
+      expect(mockPipeline.expire).toHaveBeenCalledWith('stream:stream1', 300); // cacheTTL is 300
+      expect(mockPipeline.expire).toHaveBeenCalledWith('stream:stream2', 300); // cacheTTL is 300
     });
   });
 
@@ -218,7 +219,7 @@ describe('StreamManager', () => {
       ]);
 
       expect(streamManager.redis.get).toHaveBeenCalledWith('stream_world_instance:stream1');
-      expect(streamManager.redis.setex).toHaveBeenCalledWith('stream_world_instance:stream1', 5, 'world123');
+      expect(streamManager.redis.setex).toHaveBeenCalledWith('stream_world_instance:stream1', 3, 'world123'); // 300 / 100 = 3
       expect(mockPipeline.xrange).toHaveBeenCalledWith('stream:stream1', '0-0', '+', 'COUNT', 1000);
     });
 
@@ -236,7 +237,7 @@ describe('StreamManager', () => {
       const result = await streamManager.batchPullMessages(pullCommands);
 
       expect(result[0].worldInstanceId).toBe('world123');
-      expect(streamManager.redis.setex).toHaveBeenCalledWith('stream_world_instance:stream1', 5, 'world123');
+      expect(streamManager.redis.setex).toHaveBeenCalledWith('stream_world_instance:stream1', 3, 'world123'); // 300 / 100 = 3
     });
 
     test('should handle different world instance', async () => {

@@ -1,7 +1,11 @@
-const { HybridCacheManager } = require('../cloud/util/HybridCacheManager');
+// Setup environment variables BEFORE importing modules
+process.env.CACHE_TTL_SECONDS = '300';
+process.env.CACHE_MAX_SIZE = '10000';
+
+const { HybridCacheManager } = require('../util/HybridCacheManager');
 
 // Mock the config module
-jest.mock('../cloud/config.js', () => ({
+jest.mock('../config.js', () => ({
   memoryCache: {
     get: jest.fn(),
     set: jest.fn(),
@@ -16,10 +20,12 @@ jest.mock('../cloud/config.js', () => ({
     pipeline: jest.fn(),
     del: jest.fn(),
     ping: jest.fn()
-  }
+  },
+  cacheTTL: 300,
+  cacheMaxSize: 10000
 }));
 
-const { memoryCache, cacheRedis } = require('../cloud/config.js');
+const { memoryCache, cacheRedis } = require('../config.js');
 
 // Mock pipeline for Redis batch operations
 const mockPipeline = {
@@ -34,10 +40,10 @@ describe('HybridCacheManager', () => {
   beforeEach(() => {
     // Reset all mocks
     jest.clearAllMocks();
-    
+
     // Setup pipeline mock
     cacheRedis.pipeline.mockReturnValue(mockPipeline);
-    
+
     hybridManager = new HybridCacheManager();
   });
 
@@ -46,6 +52,11 @@ describe('HybridCacheManager', () => {
       expect(hybridManager.dependencyMap).toBeInstanceOf(Map);
       expect(hybridManager.reverseMap).toBeInstanceOf(Map);
       expect(hybridManager.kvCache).toBe(cacheRedis);
+    });
+
+    test('should initialize with default TTL and maxSize from environment', () => {
+      expect(hybridManager.defaultTTL).toBe(300);
+      expect(hybridManager.maxSize).toBe(10000);
     });
   });
 
