@@ -5,20 +5,32 @@ import { InputValidator } from '../util/InputValidator.js';
 /**
  * Rate Limiter Middleware
  * Implements sliding window rate limiting for both worldInstanceId and IP address
- * - 200 requests per minute
- * - 6000 requests per hour
+ * Configurable via environment variables:
+ * - RATE_LIMIT_WINDOW_MS: Time window in milliseconds (default: 60000 = 1 minute)
+ * - RATE_LIMIT_MAX_REQUESTS: Max requests per window (default: 100)
  */
 export class RateLimiter {
   constructor() {
+    // Read from environment variables with defaults
+    const windowMs = parseInt(process.env.RATE_LIMIT_WINDOW_MS) || 60000; // Default: 1 minute
+    const maxRequests = parseInt(process.env.RATE_LIMIT_MAX_REQUESTS) || 100; // Default: 100 requests
+
+    this.windowSeconds = Math.floor(windowMs / 1000);
+    this.maxRequests = maxRequests;
+
+    // Legacy support for per-minute and per-hour limits
+    // These are now derived from the main configuration
     this.limits = {
-      perMinute: 200,
-      perHour: 6000
+      perMinute: maxRequests,
+      perHour: maxRequests * 60 // Scale up for hour if using minute window
     };
 
     this.windows = {
-      minute: 60,      // 60 seconds
-      hour: 3600       // 3600 seconds
+      minute: this.windowSeconds,
+      hour: this.windowSeconds * 60
     };
+
+    console.log(`Rate limiter configured: ${maxRequests} requests per ${this.windowSeconds}s window`);
   }
 
   /**

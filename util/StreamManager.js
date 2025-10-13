@@ -1,10 +1,10 @@
 // src/streams/StreamManager.js
-import { streamRedis } from '../config.js';
+import { streamRedis, cacheTTL } from '../config.js';
 
 export class StreamManager {
   constructor() {
     this.redis = streamRedis;
-    this.worldInstanceTTL = 5; // 5 seconds
+    this.worldInstanceTTL = cacheTTL / 100; // 3 seconds
   }
 
   // Get world instance association key
@@ -43,7 +43,7 @@ export class StreamManager {
         });
 
         // Set expiration for each stream
-        pipeline.expire(`stream:${streamId}`, 60);
+        pipeline.expire(`stream:${streamId}`, cacheTTL);
       });
 
       await pipeline.exec();

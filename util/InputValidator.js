@@ -130,8 +130,8 @@ export class InputValidator {
     }
 
     // Limit length
-    if (pattern.length > 256) {
-      throw new Error('Name pattern must be 256 characters or less');
+    if (pattern.length > 32) {
+      throw new Error('Name pattern must be 32 characters or less');
     }
 
     // Escape special SQL characters that could be used in injection

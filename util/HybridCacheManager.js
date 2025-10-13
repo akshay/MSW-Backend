@@ -1,11 +1,17 @@
 // src/cache/HybridCacheManager.js
-import { memoryCache, cacheRedis } from '../config.js';
+import { memoryCache, cacheRedis, cacheTTL, cacheMaxSize} from '../config.js';
 
 export class HybridCacheManager {
   constructor() {
     this.dependencyMap = new Map(); // entityId -> Set of cache keys
     this.reverseMap = new Map();    // cache key -> Set of entityIds
     this.kvCache = cacheRedis;
+
+    // Read cache configuration from environment variables
+    this.defaultTTL = cacheTTL;
+    this.maxSize = cacheMaxSize;
+
+    console.log(`Cache manager configured: TTL=${this.defaultTTL}s, MaxSize=${this.maxSize}`);
   }
 
   async get(key) {
@@ -20,8 +26,8 @@ export class HybridCacheManager {
       const kvResult = await this.kvCache.get(key);
       if (kvResult) {
         const parsed = JSON.parse(kvResult);
-        // Promote to memory cache
-        memoryCache.set(key, parsed, 300);
+        // Promote to memory cache with default TTL
+        memoryCache.set(key, parsed, this.defaultTTL);
         return parsed;
       }
     } catch (error) {
@@ -31,9 +37,12 @@ export class HybridCacheManager {
     return null;
   }
 
-  async set(key, value, ttl = 300, dependencies = []) {
+  async set(key, value, ttl = null, dependencies = []) {
+    // Use default TTL if not specified
+    const effectiveTTL = ttl !== null ? ttl : this.defaultTTL;
+
     // L1: Store in memory
-    memoryCache.set(key, value, ttl);
+    memoryCache.set(key, value, effectiveTTL);
 
     // Track dependencies for invalidation
     if (dependencies.length > 0) {
@@ -43,7 +52,7 @@ export class HybridCacheManager {
     // L2: Async write to Render KV (Valkey)
     setImmediate(async () => {
       try {
-        await this.kvCache.setex(key, ttl, JSON.stringify(value));
+        await this.kvCache.setex(key, effectiveTTL, JSON.stringify(value));
       } catch (error) {
         console.warn('KV cache write failed:', error.message);
       }
@@ -75,8 +84,8 @@ export class HybridCacheManager {
           if (value !== null) {
             const parsed = JSON.parse(value);
             results.set(key, parsed);
-            // Promote to memory
-            memoryCache.set(key, parsed, 300);
+            // Promote to memory with default TTL
+            memoryCache.set(key, parsed, this.defaultTTL);
           }
         });
       } catch (error) {
@@ -87,21 +96,24 @@ export class HybridCacheManager {
     return results;
   }
 
-  async mset(entries, ttl = 300) {
+  async mset(entries, ttl = null) {
+    // Use default TTL if not specified
+    const effectiveTTL = ttl !== null ? ttl : this.defaultTTL;
+
     // Set in memory cache first
     entries.forEach(([key, value]) => {
-      memoryCache.set(key, value, ttl);
+      memoryCache.set(key, value, effectiveTTL);
     });
 
     // Batch set in KV (Valkey)
     setImmediate(async () => {
       try {
         const pipeline = this.kvCache.pipeline();
-        
+
         entries.forEach(([key, value]) => {
-          pipeline.setex(key, ttl, JSON.stringify(value));
+          pipeline.setex(key, effectiveTTL, JSON.stringify(value));
         });
-        
+
         await pipeline.exec();
       } catch (error) {
         console.warn('KV batch set failed:', error.message);

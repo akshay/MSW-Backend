@@ -1,5 +1,5 @@
 // src/entities/PersistentEntityManager.js
-import { prisma } from '../config.js';
+import { prisma, cacheTTL } from '../config.js';
 import { InputValidator } from './InputValidator.js';
 
 export class PersistentEntityManager {
@@ -380,7 +380,7 @@ export class PersistentEntityManager {
         await this.cache.set(
           cacheKey,
           entities,
-          900, // 15 minutes TTL for rankings
+          cacheTTL * 3, // 15 minutes TTL for rankings
           entityIds
         );
       }
@@ -462,7 +462,7 @@ export class PersistentEntityManager {
       };
 
       // Cache with longer TTL
-      await this.cache.set(cacheKey, rankInfo, 600, [`${sanitizedEntityType}:${sanitizedEntityId}`]);
+      await this.cache.set(cacheKey, rankInfo, cacheTTL * 3, [`${sanitizedEntityType}:${sanitizedEntityId}`]);
 
       return rankInfo;
 
@@ -510,7 +510,7 @@ export class PersistentEntityManager {
 
       if (entities && entities.length > 0) {
         const entityIds = entities.map(entity => `${entity.entity_type}:${entity.id}`);
-        await this.cache.set(cacheKey, entities, 300, entityIds);
+        await this.cache.set(cacheKey, entities, cacheTTL, entityIds);
       }
 
       return entities || [];

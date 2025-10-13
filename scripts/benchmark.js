@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 // scripts/benchmark.js - Comprehensive benchmark and test suite for all commands
 
+import 'dotenv/config';
 import nacl from 'tweetnacl';
 import { CommandProcessor } from '../util/CommandProcessor.js';
 

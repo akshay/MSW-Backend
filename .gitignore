@@ -87,9 +87,6 @@ jspm_packages/
 ehthumbs.db
 Thumbs.db
 
-# Prisma
-prisma/migrations/
-
 # Railway specific
 .railway/
 

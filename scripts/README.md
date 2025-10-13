@@ -14,11 +14,24 @@ This script tests and benchmarks all command types with realistic batch sizes:
 ## Requirements
 
 - Node.js with ES modules support
-- Environment variables:
+- `.env` file with required variables (see `.env.example`):
   - `SENDER_PUBLIC_KEY`: Base64-encoded public key for authentication
   - `RECIPIENT_PRIVATE_KEY`: Base64-encoded private key for decryption
   - `DATABASE_URL`: PostgreSQL/CockroachDB connection string
-  - `REDIS_URL`: Redis connection string
+  - `CACHE_REDIS_URL`: Redis connection string
+  - `EPHEMERAL_REDIS_URL`: Redis URL for ephemeral entities
+  - `STREAM_REDIS_URL`: Redis URL for streams
+
+## Setup
+
+1. Copy `.env.example` to `.env`:
+   ```bash
+   cp .env.example .env
+   ```
+
+2. Fill in your environment variables in `.env`
+
+3. Ensure database and Redis are running
 
 ## Usage
 
@@ -27,10 +40,7 @@ This script tests and benchmarks all command types with realistic batch sizes:
 npm run benchmark
 ```
 
-### Run with custom environment:
-```bash
-SENDER_PUBLIC_KEY=<key> RECIPIENT_PRIVATE_KEY=<key> npm run benchmark
-```
+The script automatically loads environment variables from `.env` file.
 
 ## Test Configuration
 

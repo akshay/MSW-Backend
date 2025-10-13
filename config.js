@@ -39,11 +39,14 @@ export const cacheRedis = new Redis(process.env.CACHE_REDIS_URL, {
   'maxmemory-policy': 'volatile-ttl'
 });
 
-// In-memory cache
+// In-memory cache with configurable TTL and max size
+export const cacheTTL = parseInt(process.env.CACHE_TTL_SECONDS) || 300; // Default: 5 minutes
+export const cacheMaxSize = parseInt(process.env.CACHE_MAX_SIZE) || 10000; // Default: 10,000 entries
+
 export const memoryCache = new NodeCache({
-  stdTTL: 300, // 5 minutes default
-  maxKeys: 3000,
-  checkperiod: 60
+  stdTTL: cacheTTL,
+  maxKeys: cacheMaxSize,
+  checkperiod: Math.max(60, Math.floor(cacheTTL / 5)) // Check every 60s or TTL/5, whichever is larger
 });
 
 export const config = {

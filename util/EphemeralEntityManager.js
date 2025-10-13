@@ -92,7 +92,6 @@ export class EphemeralEntityManager {
             };
 
             pipeline.call('JSON.SET', key, '$', JSON.stringify(newEntity));
-            pipeline.expire(key, 300);
           } else {
             // Update existing entity attributes atomically
 
@@ -109,7 +108,6 @@ export class EphemeralEntityManager {
             // Update worldId and timestamp
             pipeline.call('JSON.SET', key, '$.worldId', worldId);
             pipeline.call('JSON.SET', key, '$.lastWrite', timestamp);
-            pipeline.expire(key, 300);
           }
         });
 
