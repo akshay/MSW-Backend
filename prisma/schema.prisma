@@ -15,6 +15,7 @@ model Entity {
   attributes Json
   rankScores Json?    @map("rank_scores") // JSONB key-value map for ranking
   version    Int      @default(1) // Version number for entity, incremented on each update
+  isDeleted  Boolean  @default(false) @map("is_deleted") // Soft delete flag
   createdAt  DateTime @default(now()) @map("created_at")
   updatedAt  DateTime @updatedAt @map("updated_at")
 
@@ -32,6 +33,9 @@ model Entity {
 
   // Index for version-based queries
   @@index([entityType, id, version], name: "idx_entity_version")
+
+  // Index for filtering deleted entities
+  @@index([entityType, worldId, isDeleted], name: "idx_entity_deleted")
 
   @@map("entities")
 }

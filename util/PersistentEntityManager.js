@@ -147,7 +147,8 @@ export class PersistentEntityManager {
             where: {
               entityType,
               id: { in: entityIds },
-              worldId
+              worldId,
+              isDeleted: false
             }
           });
 
@@ -205,21 +206,26 @@ export class PersistentEntityManager {
 
     // Group updates by entity (merge multiple updates for same entity)
     const mergedUpdates = new Map();
-    
-    updates.forEach(({ entityType, entityId, worldId, attributes, rankScores }) => {
+
+    updates.forEach(({ entityType, entityId, worldId, attributes, rankScores, isCreate, isDelete }) => {
       const key = `${entityType}:${entityId}:${worldId}`;
-      const existing = mergedUpdates.get(key) || { 
-        entityType, 
-        entityId, 
-        worldId, 
-        attributes: {}, 
-        rankScores: {} 
+      const existing = mergedUpdates.get(key) || {
+        entityType,
+        entityId,
+        worldId,
+        attributes: {},
+        rankScores: {},
+        isCreate: false,
+        isDelete: false
       };
-      
+
       mergedUpdates.set(key, {
         ...existing,
-        attributes: { ...existing.attributes, ...attributes },
-        rankScores: { ...existing.rankScores, ...(rankScores || {}) }
+        attributes: { ...existing.attributes, ...(attributes || {}) },
+        rankScores: { ...existing.rankScores, ...(rankScores || {}) },
+        // If any update in the batch is a create/delete, mark it as such
+        isCreate: existing.isCreate || isCreate || false,
+        isDelete: existing.isDelete || isDelete || false
       });
     });
 
@@ -245,12 +251,14 @@ export class PersistentEntityManager {
       const batch = updateEntries.slice(i, i + batchSize);
 
       // Prepare batch data for the function with input validation
-      const batchData = batch.map(({ entityType, entityId, worldId, attributes, rankScores }) => {
+      const batchData = batch.map(({ entityType, entityId, worldId, attributes, rankScores, isCreate, isDelete }) => {
         const entityData = {
           entity_type: entityType,
           id: entityId,
           world_id: worldId,
-          attributes: attributes
+          attributes: attributes || {},
+          is_create: isCreate || false,
+          is_delete: isDelete || false
         };
 
         // Add rank scores if present
@@ -258,30 +266,40 @@ export class PersistentEntityManager {
           entityData.rank_scores = rankScores;
         }
 
-        // Prepare stream update (only include non-null-marker values)
+        // Prepare stream update
         const streamId = `entity:${entityType}:${worldId}:${entityId}`;
         const streamData = {};
 
-        // Add attributes to stream (excluding NULL_MARKER values)
-        for (const [key, value] of Object.entries(attributes)) {
-          if (!InputValidator.isNullMarker(value)) {
-            streamData[key] = value;
+        if (isDelete) {
+          streamData.deleted = true;
+        } else {
+          // For creates/updates, include non-null-marker values
+          // Add attributes to stream (excluding NULL_MARKER values)
+          if (attributes) {
+            for (const [key, value] of Object.entries(attributes)) {
+              if (!InputValidator.isNullMarker(value)) {
+                streamData[key] = value;
+              }
+            }
           }
-        }
 
-        // Add rank scores to stream (excluding NULL_MARKER values)
-        if (rankScores) {
-          for (const [key, value] of Object.entries(rankScores)) {
-            if (!InputValidator.isNullMarker(value)) {
-              streamData[key] = value;
+          // Add rank scores to stream (excluding NULL_MARKER values)
+          if (rankScores) {
+            for (const [key, value] of Object.entries(rankScores)) {
+              if (!InputValidator.isNullMarker(value)) {
+                streamData[key] = value;
+              }
             }
           }
         }
 
-        streamUpdates.push({
-          streamId,
-          data: streamData
-        });
+        // Only add to stream updates if there's data to send
+        if (Object.keys(streamData).length > 0) {
+          streamUpdates.push({
+            streamId,
+            data: streamData
+          });
+        }
 
         return entityData;
       });
@@ -292,9 +310,18 @@ export class PersistentEntityManager {
 
       // Execute batch upsert using the database function with sanitized data
       const batchDataJson = JSON.stringify(sanitizedBatchData);
-      await this.prisma.$queryRaw`
-        SELECT batch_upsert_entities_partial(${batchDataJson}::JSONB)
+      const result = await this.prisma.$queryRaw`
+        SELECT batch_upsert_entities_partial(${batchDataJson}::JSONB) as result
       `;
+
+      // Log any errors from the batch operation
+      if (result && result[0] && result[0].result) {
+        const operationResult = result[0].result;
+        const failedOps = operationResult.results?.filter(r => !r.success) || [];
+        if (failedOps.length > 0) {
+          console.warn('Some batch operations failed:', failedOps);
+        }
+      }
 
       // Batch invalidate cache for this batch
       const cacheInvalidations = batch.map(({ entityType, entityId }) => `${entityType}:${entityId}`);
@@ -390,6 +417,7 @@ export class PersistentEntityManager {
           WHERE entity_type = ${sanitizedEntityType}
             AND id = ${sanitizedEntityId}
             AND world_id = ${sanitizedWorldId}
+            AND is_deleted = false
             AND rank_scores ? ${sanitizedRankKey}
         ),
         rank_calculation AS (
@@ -399,6 +427,7 @@ export class PersistentEntityManager {
           FROM entities e, entity_score es
           WHERE e.entity_type = ${sanitizedEntityType}
             AND e.world_id = ${sanitizedWorldId}
+            AND e.is_deleted = false
             AND e.rank_scores ? ${sanitizedRankKey}
         )
         SELECT

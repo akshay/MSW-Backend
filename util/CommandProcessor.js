@@ -63,7 +63,10 @@ export class CommandProcessor {
         this.processBatchedLoads(commandGroups.loads || []),
         this.processBatchedSaves(commandGroups.saves || []),
         this.processBatchedStreamAdds(commandGroups.streamAdds || []),
-        this.processBatchedStreamPulls(commandGroups.streamPulls || [])
+        this.processBatchedStreamPulls(commandGroups.streamPulls || []),
+        this.processBatchedSearchByName(commandGroups.searchByName || []),
+        this.processBatchedCalculateRank(commandGroups.calculateRank || []),
+        this.processBatchedGetRankings(commandGroups.getRankings || [])
       ]);
       
       // Reconstruct results in original command order
@@ -202,6 +205,15 @@ export class CommandProcessor {
           // Add worldInstanceId from request level to each pull command
           command.worldInstanceId = worldInstanceId;
           (groups.streamPulls = groups.streamPulls || []).push(command);
+          break;
+        case 'search_by_name':
+          (groups.searchByName = groups.searchByName || []).push(command);
+          break;
+        case 'calculate_rank':
+          (groups.calculateRank = groups.calculateRank || []).push(command);
+          break;
+        case 'get_rankings':
+          (groups.getRankings = groups.getRankings || []).push(command);
           break;
       }
       
@@ -368,6 +380,75 @@ export class CommandProcessor {
     return streamPullCommands.map((cmd, index) => ({
       originalIndex: cmd.originalIndex,
       type: 'pull_from_stream',
+      result: results[index]
+    }));
+  }
+
+  async processBatchedSearchByName(searchCommands) {
+    if (searchCommands.length === 0) return [];
+
+    // Process each search in parallel (they're already cached)
+    const results = await Promise.all(
+      searchCommands.map(cmd =>
+        this.persistentManager.searchByName(
+          cmd.entityType,
+          cmd.namePattern,
+          cmd.worldId,
+          cmd.limit || 100
+        )
+      )
+    );
+
+    return searchCommands.map((cmd, index) => ({
+      originalIndex: cmd.originalIndex,
+      type: 'search_by_name',
+      result: results[index]
+    }));
+  }
+
+  async processBatchedCalculateRank(calculateRankCommands) {
+    if (calculateRankCommands.length === 0) return [];
+
+    // Process each rank calculation in parallel (they're already cached)
+    const results = await Promise.all(
+      calculateRankCommands.map(cmd =>
+        this.persistentManager.calculateEntityRank(
+          cmd.entityType,
+          cmd.worldId,
+          cmd.entityId,
+          cmd.rankKey
+        )
+      )
+    );
+
+    return calculateRankCommands.map((cmd, index) => ({
+      originalIndex: cmd.originalIndex,
+      type: 'calculate_rank',
+      result: results[index]
+    }));
+  }
+
+  async processBatchedGetRankings(getRankingsCommands) {
+    if (getRankingsCommands.length === 0) return [];
+
+    // Process each ranking query in parallel (they're already cached)
+    const results = await Promise.all(
+      getRankingsCommands.map(cmd =>
+        this.persistentManager.getRankedEntities(
+          cmd.entityType,
+          cmd.worldId,
+          cmd.rankKey,
+          {
+            sortOrder: cmd.sortOrder || 'DESC',
+            limit: cmd.limit || 100
+          }
+        )
+      )
+    );
+
+    return getRankingsCommands.map((cmd, index) => ({
+      originalIndex: cmd.originalIndex,
+      type: 'get_rankings',
       result: results[index]
     }));
   }
