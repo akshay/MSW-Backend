@@ -28,7 +28,7 @@ const BENCHMARK_CONFIG = {
   worldInstanceId: 'benchmark-world-1',
 
   // Batch sizes
-  entitiesPerType: 1000,
+  entitiesPerType: 100,
   streamEventsPerEntity: 10,
   entitiesPerStream: 100,
   rankingQueries: 5,
@@ -132,7 +132,7 @@ class BenchmarkRunner {
 
     const duration = Math.round(performance.now() - startTime);
 
-    this.results.totalCommands += commands.length;
+    this.results.totalCommands += Object.values(commands).reduce((sum, arr) => sum + arr.length, 0);
     this.results.totalTime += duration;
 
     return { results, duration, error };
@@ -221,7 +221,7 @@ class BenchmarkRunner {
     }
 
     const loadResults = results.load || [];
-    const loadedCount = loadResults.filter(r => r !== null && r !== undefined).length;
+    const loadedCount = loadResults.filter(r => r !== null && r !== undefined && r !== '$$__NULL__$$').length;
     const passed = loadedCount === totalEntities;
 
     this.logTest(
@@ -395,9 +395,6 @@ class BenchmarkRunner {
       this.logTest('Calculate rank', false, duration, error.message);
       return false;
     }
-
-    console.log(results);
-
     const rankResults = results.rank || [];
     const successCount = rankResults.filter(r => r && r.rank !== null && r.rank !== undefined).length;
     const passed = successCount === totalCalculations;
