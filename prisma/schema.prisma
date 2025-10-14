@@ -4,12 +4,12 @@ generator client {
 }
 
 datasource db {
-  provider = "cockroachdb"
+  provider = "postgresql"
   url      = env("DATABASE_URL")
 }
 
 model Entity {
-  id         String   @default(cuid()) @db.Uuid
+  id         String   @default(uuid()) @db.Text
   entityType String   @map("entity_type") @db.Text
   worldId    Int      @map("world_id")
   attributes Json
@@ -22,14 +22,14 @@ model Entity {
   // Composite primary key for efficient lookups
   @@id([entityType, id])
 
-  // Index for name-based queries within entity type
-  @@index([entityType, attributes(ops: JsonbPathOps)], name: "idx_entity_type_name")
+  // GIN index for name-based JSONB queries within entity type
+  @@index([attributes], type: Gin, name: "idx_entity_attributes")
 
-  // Index for rank scores by entity type and world
-  @@index([entityType, worldId, rankScores(ops: JsonbPathOps)], name: "idx_entity_type_world_ranks")
+  // GIN index for rank scores JSONB queries
+  @@index([rankScores], type: Gin, name: "idx_entity_rank_scores")
 
-  // GIN index for efficient JSONB queries on rank scores
-  @@index([rankScores], type: Gin)
+  // Composite index for entity type and world queries
+  @@index([entityType, worldId], name: "idx_entity_type_world")
 
   // Index for version-based queries
   @@index([entityType, id, version], name: "idx_entity_version")

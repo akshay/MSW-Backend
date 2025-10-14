@@ -1,10 +1,10 @@
-import nacl from 'tweetnacl';
-import { Buffer } from 'buffer';
+import { generateKeyPair } from '@stablelib/nacl';
+import { encode as encodeBase64 } from '@stablelib/base64';
 
-const senderKeys = nacl.box.keyPair();
-const recipientKeys = nacl.box.keyPair();
+const senderKeys = generateKeyPair();
+const recipientKeys = generateKeyPair();
 
-console.log('Sender Public Key:', Buffer.from(senderKeys.publicKey).toString('base64'));
-console.log('Sender Private Key:', Buffer.from(senderKeys.secretKey).toString('base64'));
-console.log('Recipient Public Key:', Buffer.from(recipientKeys.publicKey).toString('base64'));
-console.log('Recipient Private Key:', Buffer.from(recipientKeys.secretKey).toString('base64'));
+console.log('Sender Public Key:', encodeBase64(senderKeys.publicKey));
+console.log('Sender Private Key:', encodeBase64(senderKeys.secretKey));
+console.log('Recipient Public Key:', encodeBase64(recipientKeys.publicKey));
+console.log('Recipient Private Key:', encodeBase64(recipientKeys.secretKey));

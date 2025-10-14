@@ -7,7 +7,7 @@ dotenv.config();
 
 // Prisma client for CockroachDB
 export const prisma = new PrismaClient({
-  log: ['query', 'info', 'warn', 'error'],
+  log: ['info', 'warn', 'error'],
   datasources: {
     db: {
       url: process.env.DATABASE_URL,

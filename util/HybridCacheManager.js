@@ -164,7 +164,7 @@ export class HybridCacheManager {
       keys.forEach(key => allKeys.add(key));
     });
 
-    console.log(`Batch invalidating ${allKeys.size} cache entries for ${entityIds.length} entities`);
+    // console.log(`Batch invalidating ${allKeys.size} cache entries for ${entityIds.length} entities`);
 
     // Remove from memory cache
     for (const key of allKeys) {

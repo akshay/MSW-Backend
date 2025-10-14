@@ -4,7 +4,7 @@ import express from 'express';
 import cors from 'cors';
 import helmet from 'helmet';
 import { config, ephemeralRedis, streamRedis } from './config.js';
-import { CommandProcessor } from './processors/CommandProcessor.js';
+import { CommandProcessor } from './util/CommandProcessor.js';
 import { rateLimiter } from './util/RateLimiter.js';
 
 const app = express();

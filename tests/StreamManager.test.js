@@ -135,17 +135,22 @@ describe('StreamManager', () => {
     test('should successfully batch add messages', async () => {
       const streamCommands = [
         {
-          streamId: 'stream1',
-          messages: [
-            { type: 'update', data: 'test1' },
-            { type: 'update', data: 'test2' }
-          ]
+          entityType: 'player',
+          entityId: 'player1',
+          worldId: 1,
+          message: { type: 'update', data: 'test1' }
         },
         {
-          streamId: 'stream2',
-          messages: [
-            { type: 'delete', data: 'test3' }
-          ]
+          entityType: 'player',
+          entityId: 'player1',
+          worldId: 1,
+          message: { type: 'update', data: 'test2' }
+        },
+        {
+          entityType: 'guild',
+          entityId: 'guild1',
+          worldId: 1,
+          message: { type: 'delete', data: 'test3' }
         }
       ];
 
@@ -155,18 +160,24 @@ describe('StreamManager', () => {
 
       expect(result).toEqual([
         { success: true },
+        { success: true },
         { success: true }
       ]);
 
       expect(streamManager.redis.pipeline).toHaveBeenCalledTimes(1);
-      expect(mockPipeline.xadd).toHaveBeenCalledTimes(3); // 2 + 1 messages
-      expect(mockPipeline.expire).toHaveBeenCalledTimes(2);
+      expect(mockPipeline.xadd).toHaveBeenCalledTimes(3);
+      expect(mockPipeline.expire).toHaveBeenCalledTimes(2); // 2 unique streams
       expect(mockPipeline.exec).toHaveBeenCalledTimes(1);
     });
 
     test('should handle Redis errors gracefully', async () => {
       const streamCommands = [
-        { streamId: 'stream1', messages: [{ data: 'test' }] }
+        {
+          entityType: 'player',
+          entityId: 'player1',
+          worldId: 1,
+          message: { data: 'test' }
+        }
       ];
 
       const error = new Error('Pipeline failed');
@@ -177,6 +188,26 @@ describe('StreamManager', () => {
       expect(result).toEqual([
         { success: false, error: 'Pipeline failed' }
       ]);
+    });
+
+    test('should construct streamId from entityType, worldId, and entityId', async () => {
+      const streamCommands = [
+        {
+          entityType: 'player',
+          entityId: 'player123',
+          worldId: 42,
+          message: { action: 'levelup', level: 5 }
+        }
+      ];
+
+      mockPipeline.exec.mockResolvedValueOnce([]);
+
+      await streamManager.batchAddMessages(streamCommands);
+
+      // Verify the streamId is constructed correctly as entity:entityType:worldId:entityId
+      expect(mockPipeline.xadd).toHaveBeenCalled();
+      const xaddCall = mockPipeline.xadd.mock.calls[0];
+      expect(xaddCall[0]).toBe('stream:entity:player:42:player123');
     });
   });
 
@@ -189,7 +220,13 @@ describe('StreamManager', () => {
 
     test('should successfully pull messages with new world instance', async () => {
       const pullCommands = [
-        { streamId: 'stream1', worldInstanceId: 'world123', timestamp: '0-0' }
+        {
+          entityType: 'player',
+          entityId: 'player1',
+          worldId: 1,
+          worldInstanceId: 'world123',
+          timestamp: '0-0'
+        }
       ];
 
       // Mock no current association
@@ -218,14 +255,19 @@ describe('StreamManager', () => {
         }
       ]);
 
-      expect(streamManager.redis.get).toHaveBeenCalledWith('stream_world_instance:stream1');
-      expect(streamManager.redis.setex).toHaveBeenCalledWith('stream_world_instance:stream1', 3, 'world123'); // 300 / 100 = 3
-      expect(mockPipeline.xrange).toHaveBeenCalledWith('stream:stream1', '0-0', '+', 'COUNT', 1000);
+      expect(streamManager.redis.get).toHaveBeenCalledWith('stream_world_instance:entity:player:1:player1');
+      expect(streamManager.redis.setex).toHaveBeenCalledWith('stream_world_instance:entity:player:1:player1', 3, 'world123'); // 300 / 100 = 3
+      expect(mockPipeline.xrange).toHaveBeenCalledWith('stream:entity:player:1:player1', '0-0', '+', 'COUNT', 1000);
     });
 
     test('should handle existing same world instance', async () => {
       const pullCommands = [
-        { streamId: 'stream1', worldInstanceId: 'world123' }
+        {
+          entityType: 'guild',
+          entityId: 'guild1',
+          worldId: 2,
+          worldInstanceId: 'world123'
+        }
       ];
 
       // Mock existing same association
@@ -237,12 +279,17 @@ describe('StreamManager', () => {
       const result = await streamManager.batchPullMessages(pullCommands);
 
       expect(result[0].worldInstanceId).toBe('world123');
-      expect(streamManager.redis.setex).toHaveBeenCalledWith('stream_world_instance:stream1', 3, 'world123'); // 300 / 100 = 3
+      expect(streamManager.redis.setex).toHaveBeenCalledWith('stream_world_instance:entity:guild:2:guild1', 3, 'world123'); // 300 / 100 = 3
     });
 
     test('should handle different world instance', async () => {
       const pullCommands = [
-        { streamId: 'stream1', worldInstanceId: 'world456' }
+        {
+          entityType: 'player',
+          entityId: 'player1',
+          worldId: 1,
+          worldInstanceId: 'world456'
+        }
       ];
 
       // Mock existing different association
@@ -258,7 +305,12 @@ describe('StreamManager', () => {
 
     test('should handle Redis errors in stream pull', async () => {
       const pullCommands = [
-        { streamId: 'stream1', worldInstanceId: 'world123' }
+        {
+          entityType: 'player',
+          entityId: 'player1',
+          worldId: 1,
+          worldInstanceId: 'world123'
+        }
       ];
 
       streamManager.redis.get.mockResolvedValueOnce(null);
@@ -281,8 +333,18 @@ describe('StreamManager', () => {
 
     test('should handle multiple commands with mixed results', async () => {
       const pullCommands = [
-        { streamId: 'stream1', worldInstanceId: 'world123' },
-        { streamId: 'stream2', worldInstanceId: 'world456' }
+        {
+          entityType: 'player',
+          entityId: 'player1',
+          worldId: 1,
+          worldInstanceId: 'world123'
+        },
+        {
+          entityType: 'guild',
+          entityId: 'guild1',
+          worldId: 1,
+          worldInstanceId: 'world456'
+        }
       ];
 
       // Mock world instance associations
@@ -312,7 +374,13 @@ describe('StreamManager', () => {
 
     test('should use default timestamp when not provided', async () => {
       const pullCommands = [
-        { streamId: 'stream1', worldInstanceId: 'world123' } // No timestamp
+        {
+          entityType: 'player',
+          entityId: 'player1',
+          worldId: 1,
+          worldInstanceId: 'world123'
+          // No timestamp
+        }
       ];
 
       streamManager.redis.get.mockResolvedValueOnce(null);
@@ -321,7 +389,28 @@ describe('StreamManager', () => {
 
       await streamManager.batchPullMessages(pullCommands);
 
-      expect(mockPipeline.xrange).toHaveBeenCalledWith('stream:stream1', '-', '+', 'COUNT', 1000);
+      expect(mockPipeline.xrange).toHaveBeenCalledWith('stream:entity:player:1:player1', '-', '+', 'COUNT', 1000);
+    });
+
+    test('should construct streamId correctly from entity info', async () => {
+      const pullCommands = [
+        {
+          entityType: 'quest',
+          entityId: 'quest999',
+          worldId: 5,
+          worldInstanceId: 'world-abc'
+        }
+      ];
+
+      streamManager.redis.get.mockResolvedValueOnce(null);
+      streamManager.redis.setex.mockResolvedValueOnce('OK');
+      mockPipeline.exec.mockResolvedValueOnce([[null, []]]);
+
+      await streamManager.batchPullMessages(pullCommands);
+
+      // Verify streamId format is entity:entityType:worldId:entityId
+      expect(streamManager.redis.get).toHaveBeenCalledWith('stream_world_instance:entity:quest:5:quest999');
+      expect(mockPipeline.xrange).toHaveBeenCalledWith('stream:entity:quest:5:quest999', '-', '+', 'COUNT', 1000);
     });
   });
 });

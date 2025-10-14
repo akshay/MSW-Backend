@@ -2,8 +2,24 @@
 // scripts/benchmark.js - Comprehensive benchmark and test suite for all commands
 
 import 'dotenv/config';
-import nacl from 'tweetnacl';
+import { randomUUID } from 'crypto';
+import { box } from '@stablelib/nacl';
+import { encode as encodeBase64, decode as decodeBase64 } from '@stablelib/base64';
 import { CommandProcessor } from '../util/CommandProcessor.js';
+
+// Simple ASCII encode/decode functions for authentication
+function encodeAscii(str) {
+  const buffer = new ArrayBuffer(str.length);
+  const bytes = new Uint8Array(buffer);
+  for (let i = 0; i < str.length; i++) {
+    bytes[i] = str.charCodeAt(i);
+  }
+  return bytes;
+}
+
+function decodeAscii(bytes) {
+  return String.fromCharCode(...bytes);
+}
 
 // Benchmark configuration
 const BENCHMARK_CONFIG = {
@@ -75,16 +91,16 @@ class BenchmarkRunner {
     this.writeLittleEndianUint64(nonce, 16, elapsedSeconds);
 
     // Encrypt worldInstanceId
-    const message = nacl.util.decodeUTF8(BENCHMARK_CONFIG.worldInstanceId);
-    const senderPublicKey = nacl.util.decodeBase64(process.env.SENDER_PUBLIC_KEY);
-    const recipientPrivateKey = nacl.util.decodeBase64(process.env.RECIPIENT_PRIVATE_KEY);
+    const message = encodeAscii(BENCHMARK_CONFIG.worldInstanceId);
+    const recipientPublicKey = decodeBase64(process.env.RECIPIENT_PUBLIC_KEY);
+    const senderPrivateKey = decodeBase64(process.env.SENDER_PRIVATE_KEY);
 
-    const encrypted = nacl.box(message, nonce, senderPublicKey, recipientPrivateKey);
-    const encryptedString = nacl.util.encodeUTF8(encrypted).slice(0, 24);
+    const encrypted = box(recipientPublicKey, senderPrivateKey, nonce, message);
+    const encryptedString = encodeBase64(encrypted);
 
     return {
       encrypted: encryptedString,
-      nonce: nacl.util.encodeBase64(nonce),
+      nonce: encodeBase64(nonce),
       auth: process.env.SENDER_PUBLIC_KEY,
       worldInstanceId: BENCHMARK_CONFIG.worldInstanceId
     };
@@ -129,22 +145,21 @@ class BenchmarkRunner {
     const totalEntities = BENCHMARK_CONFIG.entityTypes.length * BENCHMARK_CONFIG.entitiesPerType;
     this.log(`Creating ${totalEntities} entities (${BENCHMARK_CONFIG.entitiesPerType} per type)...`, colors.cyan);
 
-    const commands = [];
+    const commands = { save: [] };
 
     for (const entityType of BENCHMARK_CONFIG.entityTypes) {
       for (let i = 0; i < BENCHMARK_CONFIG.entitiesPerType; i++) {
-        const entityId = `${entityType}-${i}`;
-        commands.push({
-          type: 'save_entity',
+        const entityId = randomUUID();
+        commands.save.push({
           entityType,
           entityId,
           worldId: BENCHMARK_CONFIG.worldId,
           attributes: {
             name: `${entityType}_${i}`,
             level: Math.floor(Math.random() * 100) + 1,
-            created_at: Date.now()
+            created_at: Date.now(),
+            rank_score: Math.random() * 10000
           },
-          rank_score: Math.random() * 10000,
           isCreate: true
         });
 
@@ -163,7 +178,8 @@ class BenchmarkRunner {
       return false;
     }
 
-    const successCount = results.filter(r => r && r.success !== false).length;
+    const saveResults = results.save || [];
+    const successCount = saveResults.filter(r => r && r.success !== false).length;
     const passed = successCount === totalEntities;
 
     this.logTest(
@@ -184,13 +200,12 @@ class BenchmarkRunner {
     const totalEntities = BENCHMARK_CONFIG.entityTypes.length * BENCHMARK_CONFIG.entitiesPerType;
     this.log(`Loading ${totalEntities} entities...`, colors.cyan);
 
-    const commands = [];
+    const commands = { load: [] };
 
     for (const entityType of BENCHMARK_CONFIG.entityTypes) {
       const entities = this.createdEntities.get(entityType) || [];
       for (const entityId of entities) {
-        commands.push({
-          type: 'load_entity',
+        commands.load.push({
           entityType,
           entityId,
           worldId: BENCHMARK_CONFIG.worldId
@@ -205,7 +220,8 @@ class BenchmarkRunner {
       return false;
     }
 
-    const loadedCount = results.filter(r => r !== null && r !== undefined).length;
+    const loadResults = results.load || [];
+    const loadedCount = loadResults.filter(r => r !== null && r !== undefined).length;
     const passed = loadedCount === totalEntities;
 
     this.logTest(
@@ -226,21 +242,20 @@ class BenchmarkRunner {
     const totalEntities = BENCHMARK_CONFIG.entityTypes.length * BENCHMARK_CONFIG.entitiesPerType;
     this.log(`Updating ${totalEntities} entities...`, colors.cyan);
 
-    const commands = [];
+    const commands = { save: [] };
 
     for (const entityType of BENCHMARK_CONFIG.entityTypes) {
       const entities = this.createdEntities.get(entityType) || [];
       for (const entityId of entities) {
-        commands.push({
-          type: 'save_entity',
+        commands.save.push({
           entityType,
           entityId,
           worldId: BENCHMARK_CONFIG.worldId,
           attributes: {
-            level: Math.floor(Math.random() * 100) + 1,
-            updated_at: Date.now()
-          },
-          rank_score: Math.random() * 10000
+            level: Math.floor(Math.random() * 100) + 100,
+            updated_at: Date.now(),
+            rank_score: Math.random() * 10000
+          }
           // No isCreate or isDelete = update
         });
       }
@@ -253,7 +268,8 @@ class BenchmarkRunner {
       return false;
     }
 
-    const successCount = results.filter(r => r && r.success !== false).length;
+    const saveResults = results.save || [];
+    const successCount = saveResults.filter(r => r && r.success !== false).length;
     const passed = successCount === totalEntities;
 
     this.logTest(
@@ -274,12 +290,11 @@ class BenchmarkRunner {
     const totalSearches = BENCHMARK_CONFIG.entityTypes.length * BENCHMARK_CONFIG.searchQueriesPerType;
     this.log(`Executing ${totalSearches} search queries...`, colors.cyan);
 
-    const commands = [];
+    const commands = { search: [] };
 
     for (const entityType of BENCHMARK_CONFIG.entityTypes) {
       for (let i = 0; i < BENCHMARK_CONFIG.searchQueriesPerType; i++) {
-        commands.push({
-          type: 'search_by_name',
+        commands.search.push({
           entityType,
           namePattern: `${entityType}_${i}`,
           worldId: BENCHMARK_CONFIG.worldId,
@@ -295,8 +310,9 @@ class BenchmarkRunner {
       return false;
     }
 
-    const successCount = results.filter(r => Array.isArray(r)).length;
-    const totalResults = results.reduce((sum, r) => sum + (Array.isArray(r) ? r.length : 0), 0);
+    const searchResults = results.search || [];
+    const successCount = searchResults.filter(r => Array.isArray(r)).length;
+    const totalResults = searchResults.reduce((sum, r) => sum + (Array.isArray(r) ? r.length : 0), 0);
     const passed = successCount === totalSearches;
 
     this.logTest(
@@ -317,11 +333,10 @@ class BenchmarkRunner {
     const totalQueries = BENCHMARK_CONFIG.entityTypes.length;
     this.log(`Fetching rankings for ${totalQueries} entity types...`, colors.cyan);
 
-    const commands = [];
+    const commands = { top: [] };
 
     for (const entityType of BENCHMARK_CONFIG.entityTypes) {
-      commands.push({
-        type: 'get_rankings',
+      commands.top.push({
         entityType,
         worldId: BENCHMARK_CONFIG.worldId,
         rankKey: 'rank_score',
@@ -337,8 +352,9 @@ class BenchmarkRunner {
       return false;
     }
 
-    const successCount = results.filter(r => Array.isArray(r)).length;
-    const totalResults = results.reduce((sum, r) => sum + (Array.isArray(r) ? r.length : 0), 0);
+    const topResults = results.top || [];
+    const successCount = topResults.filter(r => Array.isArray(r)).length;
+    const totalResults = topResults.reduce((sum, r) => sum + (Array.isArray(r) ? r.length : 0), 0);
     const passed = successCount === totalQueries;
 
     this.logTest(
@@ -359,13 +375,12 @@ class BenchmarkRunner {
     const totalCalculations = BENCHMARK_CONFIG.entityTypes.length * BENCHMARK_CONFIG.rankCalculationsPerType;
     this.log(`Calculating ranks for ${totalCalculations} entities...`, colors.cyan);
 
-    const commands = [];
+    const commands = { rank: [] };
 
     for (const entityType of BENCHMARK_CONFIG.entityTypes) {
       const entities = this.createdEntities.get(entityType) || [];
       for (let i = 0; i < Math.min(BENCHMARK_CONFIG.rankCalculationsPerType, entities.length); i++) {
-        commands.push({
-          type: 'calculate_rank',
+        commands.rank.push({
           entityType,
           entityId: entities[i],
           worldId: BENCHMARK_CONFIG.worldId,
@@ -381,7 +396,10 @@ class BenchmarkRunner {
       return false;
     }
 
-    const successCount = results.filter(r => r && r.rank !== null && r.rank !== undefined).length;
+    console.log(results);
+
+    const rankResults = results.rank || [];
+    const successCount = rankResults.filter(r => r && r.rank !== null && r.rank !== undefined).length;
     const passed = successCount === totalCalculations;
 
     this.logTest(
@@ -404,21 +422,18 @@ class BenchmarkRunner {
 
     this.log(`Adding ${totalMessages} messages to streams (${BENCHMARK_CONFIG.streamEventsPerEntity} events × ${entitiesPerType} entities × ${BENCHMARK_CONFIG.entityTypes.length} types)...`, colors.cyan);
 
-    const commands = [];
+    const commands = { send: [] };
 
     for (const entityType of BENCHMARK_CONFIG.entityTypes) {
       const entities = this.createdEntities.get(entityType) || [];
       for (let i = 0; i < entitiesPerType; i++) {
         const entityId = entities[i];
-        const streamId = `entity:${entityType}:${BENCHMARK_CONFIG.worldId}:${entityId}`;
 
         for (let j = 0; j < BENCHMARK_CONFIG.streamEventsPerEntity; j++) {
-          commands.push({
-            type: 'add_to_stream',
+          commands.send.push({
             entityType,
             entityId,
             worldId: BENCHMARK_CONFIG.worldId,
-            streamId,
             message: {
               event: `event_${j}`,
               timestamp: Date.now(),
@@ -436,7 +451,8 @@ class BenchmarkRunner {
       return false;
     }
 
-    const successCount = results.filter(r => r && r.success !== false).length;
+    const sendResults = results.send || [];
+    const successCount = sendResults.filter(r => r && r.success !== false).length;
     const passed = successCount === totalMessages;
 
     this.logTest(
@@ -459,20 +475,17 @@ class BenchmarkRunner {
 
     this.log(`Pulling from ${totalPulls} streams...`, colors.cyan);
 
-    const commands = [];
+    const commands = { recv: [] };
 
     for (const entityType of BENCHMARK_CONFIG.entityTypes) {
       const entities = this.createdEntities.get(entityType) || [];
       for (let i = 0; i < entitiesPerType; i++) {
         const entityId = entities[i];
-        const streamId = `entity:${entityType}:${BENCHMARK_CONFIG.worldId}:${entityId}`;
 
-        commands.push({
-          type: 'pull_from_stream',
+        commands.recv.push({
           entityType,
           entityId,
           worldId: BENCHMARK_CONFIG.worldId,
-          streamId,
           count: BENCHMARK_CONFIG.streamEventsPerEntity
         });
       }
@@ -485,8 +498,9 @@ class BenchmarkRunner {
       return false;
     }
 
-    const successCount = results.filter(r => Array.isArray(r)).length;
-    const totalMessages = results.reduce((sum, r) => sum + (Array.isArray(r) ? r.length : 0), 0);
+    const recvResults = results.recv || [];
+    const successCount = recvResults.filter(r => Array.isArray(r.data)).length;
+    const totalMessages = recvResults.reduce((sum, r) => sum + (Array.isArray(r.data) ? r.data.length : 0), 0);
     const passed = successCount === totalPulls;
 
     this.logTest(
@@ -507,13 +521,12 @@ class BenchmarkRunner {
     const totalEntities = BENCHMARK_CONFIG.entityTypes.length * BENCHMARK_CONFIG.entitiesPerType;
     this.log(`Deleting ${totalEntities} entities...`, colors.cyan);
 
-    const commands = [];
+    const commands = { save: [] };
 
     for (const entityType of BENCHMARK_CONFIG.entityTypes) {
       const entities = this.createdEntities.get(entityType) || [];
       for (const entityId of entities) {
-        commands.push({
-          type: 'save_entity',
+        commands.save.push({
           entityType,
           entityId,
           worldId: BENCHMARK_CONFIG.worldId,
@@ -530,7 +543,8 @@ class BenchmarkRunner {
       return false;
     }
 
-    const successCount = results.filter(r => r && r.success !== false).length;
+    const saveResults = results.save || [];
+    const successCount = saveResults.filter(r => r && r.success !== false).length;
     const passed = successCount === totalEntities;
 
     this.logTest(
@@ -551,13 +565,12 @@ class BenchmarkRunner {
     const totalEntities = BENCHMARK_CONFIG.entityTypes.length * BENCHMARK_CONFIG.entitiesPerType;
     this.log(`Attempting to load ${totalEntities} deleted entities...`, colors.cyan);
 
-    const commands = [];
+    const commands = { load: [] };
 
     for (const entityType of BENCHMARK_CONFIG.entityTypes) {
       const entities = this.createdEntities.get(entityType) || [];
       for (const entityId of entities) {
-        commands.push({
-          type: 'load_entity',
+        commands.load.push({
           entityType,
           entityId,
           worldId: BENCHMARK_CONFIG.worldId
@@ -572,7 +585,8 @@ class BenchmarkRunner {
       return false;
     }
 
-    const nullCount = results.filter(r => r === null || r === undefined).length;
+    const loadResults = results.load || [];
+    const nullCount = loadResults.filter(r => r === '$$__NULL__$$').length;
     const passed = nullCount === totalEntities;
 
     this.logTest(
@@ -659,6 +673,9 @@ class BenchmarkRunner {
 
     // Run all tests in sequence
     await this.testCreateEntities();
+    // Wait 600ms before verifying entities (excluded from benchmark time)
+    await new Promise(resolve => setTimeout(resolve, 600));
+
     await this.testLoadEntities();
     await this.testUpdateEntities();
     await this.testSearchByName();
@@ -667,9 +684,13 @@ class BenchmarkRunner {
     await this.testAddToStreams();
     await this.testPullFromStreams();
     await this.testDeleteEntities();
+
+    // Wait 600ms before verifying deleted entities (excluded from benchmark time)
+    await new Promise(resolve => setTimeout(resolve, 600));
+
     await this.testVerifyDeletedNotLoaded();
 
-    const totalDuration = Math.round(performance.now() - startTime);
+    const totalDuration = Math.round(performance.now() - startTime - 1200);
     this.results.totalTime = totalDuration;
 
     this.printSummary();

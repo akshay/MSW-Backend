@@ -225,10 +225,6 @@ export class InputValidator {
       throw new Error('Batch data must be an array');
     }
 
-    if (batchData.length > 1000) {
-      throw new Error('Batch size too large (max 1000 items)');
-    }
-
     return batchData.map((item, index) => {
       try {
         const { sanitized: attributes, keysToRemove: attributeKeysToRemove } =
@@ -238,6 +234,8 @@ export class InputValidator {
           entity_type: this.sanitizeEntityType(item.entity_type),
           id: this.sanitizeEntityId(item.id),
           world_id: this.sanitizeWorldId(item.world_id),
+          is_create: item.is_create === true,
+          is_delete: item.is_delete === true,
           attributes,
           attributes_keys_to_remove: attributeKeysToRemove
         };

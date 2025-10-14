@@ -238,8 +238,8 @@ $$ LANGUAGE plpgsql;
 -- Name search function (worldId optional)
 CREATE OR REPLACE FUNCTION get_entities_by_name(
   p_entity_type TEXT,
-  p_world_id INT DEFAULT NULL,
   name_pattern TEXT,
+  p_world_id INT DEFAULT NULL,
   limit_count INT DEFAULT 100
 )
 RETURNS TABLE(entity_type TEXT, id TEXT, world_id INT, attributes JSONB, rank_scores JSONB) AS $$

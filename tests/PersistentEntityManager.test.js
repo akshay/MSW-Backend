@@ -27,7 +27,8 @@ const mockCache = {
   set: jest.fn(),
   get: jest.fn(),
   trackDependencies: jest.fn(),
-  invalidateEntities: jest.fn()
+  invalidateEntities: jest.fn(),
+  defaultTTL: 300
 };
 
 const mockPrisma = {
@@ -238,7 +239,7 @@ describe('PersistentEntityManager', () => {
 
       const result = await manager.batchLoad(requests);
 
-      expect(result).toEqual([null]);
+      expect(result).toEqual(['$$__NULL__$$']);
     });
 
     it('should handle versioned loads with version parameter', async () => {
@@ -418,153 +419,217 @@ describe('PersistentEntityManager', () => {
     });
   });
 
-  describe('getRankedEntities', () => {
-    it('should return cached rankings when available', async () => {
-      const rankings = [{ id: 'user1', score: 1000 }];
-      mockCache.get.mockResolvedValue(rankings);
-
-      const result = await manager.getRankedEntities('character', 1, 'level');
-
-      expect(result).toEqual(rankings);
-      expect(mockCache.get).toHaveBeenCalledWith('rankings:character:1:level:DESC:100');
-    });
-
-    it('should query database when cache miss', async () => {
-      const entities = [{ id: 'user1', score: 1000 }];
-      mockCache.get.mockResolvedValue(null);
-      mockPrisma.$queryRaw.mockResolvedValue(entities);
-
-      const result = await manager.getRankedEntities('character', 1, 'level');
-
-      expect(result).toEqual(entities);
-      expect(mockPrisma.$queryRaw).toHaveBeenCalled();
-    });
-
-    it('should handle database errors gracefully', async () => {
-      mockCache.get.mockResolvedValue(null);
-      mockPrisma.$queryRaw.mockRejectedValue(new Error('DB Error'));
-
-      const result = await manager.getRankedEntities('character', 1, 'level');
-
+  describe('batchGetRankedEntities', () => {
+    it('should return empty array for empty requests', async () => {
+      const result = await manager.batchGetRankedEntities([]);
       expect(result).toEqual([]);
     });
 
-    it('should use custom sort order and limit', async () => {
-      mockCache.get.mockResolvedValue(null);
-      mockPrisma.$queryRaw.mockResolvedValue([]);
+    it('should batch cache gets and return cached values', async () => {
+      const requests = [
+        { entityType: 'character', worldId: 1, rankKey: 'level', sortOrder: 'DESC', limit: 100 },
+        { entityType: 'character', worldId: 1, rankKey: 'power', sortOrder: 'ASC', limit: 50 }
+      ];
 
-      await manager.getRankedEntities('character', 1, 'level', {
-        sortOrder: 'ASC',
-        limit: 50
-      });
+      const cacheResults = new Map([
+        ['rankings:character:1:level:DESC:100', [{ id: 'user1', score: 1000 }]],
+        ['rankings:character:1:power:ASC:50', [{ id: 'user2', power: 500 }]]
+      ]);
 
-      expect(mockCache.get).toHaveBeenCalledWith('rankings:character:1:level:ASC:50');
+      mockCache.mget.mockResolvedValue(cacheResults);
+
+      const result = await manager.batchGetRankedEntities(requests);
+
+      expect(result).toHaveLength(2);
+      expect(result[0]).toEqual([{ id: 'user1', score: 1000 }]);
+      expect(result[1]).toEqual([{ id: 'user2', power: 500 }]);
+      expect(mockCache.mget).toHaveBeenCalledWith([
+        'rankings:character:1:level:DESC:100',
+        'rankings:character:1:power:ASC:50'
+      ]);
+    });
+
+    it('should handle cache misses and batch database queries', async () => {
+      const requests = [
+        { entityType: 'character', worldId: 1, rankKey: 'level' },
+        { entityType: 'character', worldId: 1, rankKey: 'power' }
+      ];
+
+      const cacheResults = new Map();
+      mockCache.mget.mockResolvedValue(cacheResults);
+      mockPrisma.$queryRaw
+        .mockResolvedValueOnce([{ id: 'user1', score: 1000 }])
+        .mockResolvedValueOnce([{ id: 'user2', power: 500 }]);
+
+      const result = await manager.batchGetRankedEntities(requests);
+
+      expect(result).toHaveLength(2);
+      expect(result[0]).toEqual([{ id: 'user1', score: 1000 }]);
+      expect(result[1]).toEqual([{ id: 'user2', power: 500 }]);
+      expect(mockCache.mset).toHaveBeenCalled();
+    });
+
+    it('should mix cached and non-cached results', async () => {
+      const requests = [
+        { entityType: 'character', worldId: 1, rankKey: 'level' },
+        { entityType: 'character', worldId: 1, rankKey: 'power' }
+      ];
+
+      const cacheResults = new Map([
+        ['rankings:character:1:level:DESC:100', [{ id: 'user1', score: 1000 }]]
+      ]);
+
+      mockCache.mget.mockResolvedValue(cacheResults);
+      mockPrisma.$queryRaw.mockResolvedValueOnce([{ id: 'user2', power: 500 }]);
+
+      const result = await manager.batchGetRankedEntities(requests);
+
+      expect(result).toHaveLength(2);
+      expect(result[0]).toEqual([{ id: 'user1', score: 1000 }]);
+      expect(result[1]).toEqual([{ id: 'user2', power: 500 }]);
     });
   });
 
-  describe('calculateEntityRank', () => {
-    it('should return cached rank when available', async () => {
-      const rankInfo = { rank: 1, score: 1000 };
-      mockCache.get.mockResolvedValue(rankInfo);
-
-      const result = await manager.calculateEntityRank('character', 1, 'user1', 'level');
-
-      expect(result).toEqual(rankInfo);
-      expect(mockCache.get).toHaveBeenCalledWith('rank:character:1:user1:level');
-    });
-
-    it('should calculate rank from database when cache miss', async () => {
-      const dbResult = [{ score: 1000, rank: 1, total_entities: 100 }];
-      mockCache.get.mockResolvedValue(null);
-      mockPrisma.$queryRaw.mockResolvedValue(dbResult);
-
-      const result = await manager.calculateEntityRank('character', 1, 'user1', 'level');
-
-      expect(result).toEqual({
-        entityId: 'user1',
-        entityType: 'character',
-        worldId: 1,
-        rankKey: 'level',
-        score: 1000,
-        rank: 1,
-        totalEntities: 100
-      });
-    });
-
-    it('should handle entity not found', async () => {
-      mockCache.get.mockResolvedValue(null);
-      mockPrisma.$queryRaw.mockResolvedValue([]);
-
-      const result = await manager.calculateEntityRank('character', 1, 'user1', 'level');
-
-      expect(result).toEqual({
-        entityId: 'user1',
-        entityType: 'character',
-        worldId: 1,
-        rankKey: 'level',
-        score: null,
-        rank: null,
-        totalEntities: 0
-      });
-    });
-
-    it('should handle database errors gracefully', async () => {
-      mockCache.get.mockResolvedValue(null);
-      mockPrisma.$queryRaw.mockRejectedValue(new Error('DB Error'));
-
-      const result = await manager.calculateEntityRank('character', 1, 'user1', 'level');
-
-      expect(result).toEqual({
-        entityId: 'user1',
-        entityType: 'character',
-        worldId: 1,
-        rankKey: 'level',
-        score: null,
-        rank: null,
-        totalEntities: 0,
-        error: 'DB Error'
-      });
-    });
-  });
-
-  describe('searchByName', () => {
-    it('should return cached search results when available', async () => {
-      const entities = [{ id: 'user1', name: 'TestPlayer' }];
-      mockCache.get.mockResolvedValue(entities);
-
-      const result = await manager.searchByName('character', 'Test', 1);
-
-      expect(result).toEqual(entities);
-      expect(mockCache.get).toHaveBeenCalledWith('search:character:1:Test:100');
-    });
-
-    it('should search database when cache miss', async () => {
-      const entities = [{ id: 'user1', name: 'TestPlayer' }];
-      mockCache.get.mockResolvedValue(null);
-      mockPrisma.$queryRaw.mockResolvedValue(entities);
-
-      const result = await manager.searchByName('character', 'Test', 1);
-
-      expect(result).toEqual(entities);
-      expect(mockPrisma.$queryRaw).toHaveBeenCalled();
-    });
-
-    it('should handle all worlds search', async () => {
-      mockCache.get.mockResolvedValue(null);
-      mockPrisma.$queryRaw.mockResolvedValue([]);
-
-      await manager.searchByName('character', 'Test');
-
-      expect(mockCache.get).toHaveBeenCalledWith('search:character:all:Test:100');
-    });
-
-    it('should handle database errors gracefully', async () => {
-      mockCache.get.mockResolvedValue(null);
-      mockPrisma.$queryRaw.mockRejectedValue(new Error('Search Error'));
-
-      const result = await manager.searchByName('character', 'Test', 1);
-
+  describe('batchSearchByName', () => {
+    it('should return empty array for empty requests', async () => {
+      const result = await manager.batchSearchByName([]);
       expect(result).toEqual([]);
     });
+
+    it('should batch cache gets and return cached values', async () => {
+      const requests = [
+        { entityType: 'character', namePattern: 'John%', worldId: 1, limit: 100 },
+        { entityType: 'character', namePattern: 'Jane%', worldId: 1, limit: 50 }
+      ];
+
+      const cacheResults = new Map([
+        ['search:character:1:John%:100', [{ id: 'user1', name: 'John' }]],
+        ['search:character:1:Jane%:50', [{ id: 'user2', name: 'Jane' }]]
+      ]);
+
+      mockCache.mget.mockResolvedValue(cacheResults);
+
+      const result = await manager.batchSearchByName(requests);
+
+      expect(result).toHaveLength(2);
+      expect(result[0]).toEqual([{ id: 'user1', name: 'John' }]);
+      expect(result[1]).toEqual([{ id: 'user2', name: 'Jane' }]);
+      expect(mockCache.mget).toHaveBeenCalledWith([
+        'search:character:1:John%:100',
+        'search:character:1:Jane%:50'
+      ]);
+    });
+
+    it('should handle cache misses and batch database queries', async () => {
+      const requests = [
+        { entityType: 'character', namePattern: 'John%', worldId: 1 },
+        { entityType: 'character', namePattern: 'Jane%', worldId: 1 }
+      ];
+
+      const cacheResults = new Map();
+      mockCache.mget.mockResolvedValue(cacheResults);
+      mockPrisma.$queryRaw
+        .mockResolvedValueOnce([{ id: 'user1', name: 'John' }])
+        .mockResolvedValueOnce([{ id: 'user2', name: 'Jane' }]);
+
+      const result = await manager.batchSearchByName(requests);
+
+      expect(result).toHaveLength(2);
+      expect(result[0]).toEqual([{ id: 'user1', name: 'John' }]);
+      expect(result[1]).toEqual([{ id: 'user2', name: 'Jane' }]);
+      expect(mockCache.mset).toHaveBeenCalled();
+    });
+
+    it('should mix cached and non-cached results', async () => {
+      const requests = [
+        { entityType: 'character', namePattern: 'John%', worldId: 1 },
+        { entityType: 'character', namePattern: 'Jane%', worldId: 1 }
+      ];
+
+      const cacheResults = new Map([
+        ['search:character:1:John%:100', [{ id: 'user1', name: 'John' }]]
+      ]);
+
+      mockCache.mget.mockResolvedValue(cacheResults);
+      mockPrisma.$queryRaw.mockResolvedValueOnce([{ id: 'user2', name: 'Jane' }]);
+
+      const result = await manager.batchSearchByName(requests);
+
+      expect(result).toHaveLength(2);
+      expect(result[0]).toEqual([{ id: 'user1', name: 'John' }]);
+      expect(result[1]).toEqual([{ id: 'user2', name: 'Jane' }]);
+    });
   });
+
+  describe('batchCalculateEntityRank', () => {
+    it('should return empty array for empty requests', async () => {
+      const result = await manager.batchCalculateEntityRank([]);
+      expect(result).toEqual([]);
+    });
+
+    it('should batch cache gets and return cached values', async () => {
+      const requests = [
+        { entityType: 'character', worldId: 1, entityId: 'user1', rankKey: 'level' },
+        { entityType: 'character', worldId: 1, entityId: 'user2', rankKey: 'level' }
+      ];
+
+      const cacheResults = new Map([
+        ['rank:character:1:user1:level', { rank: 1, score: 1000 }],
+        ['rank:character:1:user2:level', { rank: 2, score: 900 }]
+      ]);
+
+      mockCache.mget.mockResolvedValue(cacheResults);
+
+      const result = await manager.batchCalculateEntityRank(requests);
+
+      expect(result).toHaveLength(2);
+      expect(result[0]).toEqual({ rank: 1, score: 1000 });
+      expect(result[1]).toEqual({ rank: 2, score: 900 });
+      expect(mockCache.mget).toHaveBeenCalledWith([
+        'rank:character:1:user1:level',
+        'rank:character:1:user2:level'
+      ]);
+    });
+
+    it('should handle cache misses and batch database queries', async () => {
+      const requests = [
+        { entityType: 'character', worldId: 1, entityId: 'user1', rankKey: 'level' },
+        { entityType: 'character', worldId: 1, entityId: 'user2', rankKey: 'level' }
+      ];
+
+      const cacheResults = new Map();
+      mockCache.mget.mockResolvedValue(cacheResults);
+      mockPrisma.$queryRaw
+        .mockResolvedValueOnce([{ score: 1000, rank: 1, total_entities: 100 }])
+        .mockResolvedValueOnce([{ score: 900, rank: 2, total_entities: 100 }]);
+
+      const result = await manager.batchCalculateEntityRank(requests);
+
+      expect(result).toHaveLength(2);
+      expect(result[0]).toMatchObject({ rank: 1, score: 1000 });
+      expect(result[1]).toMatchObject({ rank: 2, score: 900 });
+      expect(mockCache.mset).toHaveBeenCalled();
+    });
+
+    it('should mix cached and non-cached results', async () => {
+      const requests = [
+        { entityType: 'character', worldId: 1, entityId: 'user1', rankKey: 'level' },
+        { entityType: 'character', worldId: 1, entityId: 'user2', rankKey: 'level' }
+      ];
+
+      const cacheResults = new Map([
+        ['rank:character:1:user1:level', { rank: 1, score: 1000 }]
+      ]);
+
+      mockCache.mget.mockResolvedValue(cacheResults);
+      mockPrisma.$queryRaw.mockResolvedValueOnce([{ score: 900, rank: 2, total_entities: 100 }]);
+
+      const result = await manager.batchCalculateEntityRank(requests);
+
+      expect(result).toHaveLength(2);
+      expect(result[0]).toEqual({ rank: 1, score: 1000 });
+      expect(result[1]).toMatchObject({ rank: 2, score: 900 });
+    });
+  });
+
 });

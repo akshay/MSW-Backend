@@ -165,8 +165,13 @@ export class PersistentEntityManager {
       const allCacheEntries = [];
 
       groupResults.forEach(({ misses, dbEntities }) => {
+        const indexedMisses = new Map();
+        misses.forEach(miss => {
+          indexedMisses.set(miss.entityId, miss);
+        });
+
         dbEntities.forEach(entity => {
-          const matchingMiss = misses.find(miss => miss.entityId === entity.id);
+          const matchingMiss = indexedMisses.get(entity.id);
 
           if (matchingMiss) {
             // Cache the newest version (without version in key)
@@ -193,12 +198,12 @@ export class PersistentEntityManager {
 
       // Batch update cache
       if (allCacheEntries.length > 0) {
-        await this.cache.mset(allCacheEntries, 300);
+        await this.cache.mset(allCacheEntries, this.cache.defaultTTL);
       }
     }
 
     // Return results in original order
-    return requests.map((_, index) => resultMap.get(index) || null);
+    return requests.map((_, index) => resultMap.get(index) || InputValidator.NULL_MARKER);
   }
 
   async batchSavePartial(updates) {
@@ -243,7 +248,7 @@ export class PersistentEntityManager {
   }
 
   async performBatchUpsert(mergedUpdates) {
-    const batchSize = 150; // Increased batch size for better throughput
+    const batchSize = 5000; // Increased batch size for better throughput
     const updateEntries = Array.from(mergedUpdates.values());
     const streamUpdates = []; // Collect stream updates
 
@@ -329,194 +334,316 @@ export class PersistentEntityManager {
     }
 
     // Batch add to streams (fire-and-forget for performance)
-    setImmediate(async () => {
-      try {
-        await this.streamManager.batchAddToStreams(streamUpdates);
-      } catch (error) {
-        console.warn('Stream updates failed for persistent entities:', error);
-      }
-    });
+    try {
+      await this.streamManager.batchAddToStreams(streamUpdates);
+    } catch (error) {
+      console.warn('Stream updates failed for persistent entities:', error);
+    }
 
     console.log(`Atomic batch upsert completed: ${mergedUpdates.size} entities`);
   }
 
-  // Optimized ranking queries with better caching
-  async getRankedEntities(entityType, worldId, rankKey, options = {}) {
-    const {
-      sortOrder = 'DESC',
-      limit = 100
-    } = options;
+  // Batch get ranked entities with batched cache operations
+  async batchGetRankedEntities(requests) {
+    if (requests.length === 0) return [];
 
-    // Validate all inputs before SQL execution
-    const sanitizedEntityType = InputValidator.sanitizeEntityType(entityType);
-    const sanitizedWorldId = InputValidator.sanitizeWorldId(worldId);
-    const sanitizedRankKey = InputValidator.sanitizeRankKey(rankKey);
-    const sanitizedSortOrder = InputValidator.sanitizeSortOrder(sortOrder);
-    const sanitizedLimit = InputValidator.sanitizeLimit(limit);
+    // Sanitize and build cache keys for all requests
+    const sanitizedRequests = requests.map(({ entityType, worldId, rankKey, sortOrder = 'DESC', limit = 100 }) => {
+      const sanitizedEntityType = InputValidator.sanitizeEntityType(entityType);
+      const sanitizedWorldId = InputValidator.sanitizeWorldId(worldId);
+      const sanitizedRankKey = InputValidator.sanitizeRankKey(rankKey);
+      const sanitizedSortOrder = InputValidator.sanitizeSortOrder(sortOrder);
+      const sanitizedLimit = InputValidator.sanitizeLimit(limit);
+      const cacheKey = `rankings:${sanitizedEntityType}:${sanitizedWorldId}:${sanitizedRankKey}:${sanitizedSortOrder}:${sanitizedLimit}`;
 
-    const cacheKey = `rankings:${sanitizedEntityType}:${sanitizedWorldId}:${sanitizedRankKey}:${sanitizedSortOrder}:${sanitizedLimit}`;
-
-    // Try cache first
-    let rankings = await this.cache.get(cacheKey);
-    if (rankings) {
-      return rankings;
-    }
-
-    // Query database with prepared statement for better performance
-    try {
-      const entities = await this.prisma.$queryRaw`
-        SELECT * FROM get_ranked_entities(
-          ${sanitizedEntityType}::TEXT,
-          ${sanitizedWorldId}::INT,
-          ${sanitizedRankKey}::TEXT,
-          ${sanitizedSortOrder}::TEXT,
-          ${sanitizedLimit}::INT
-        )
-      `;
-
-      if (entities && entities.length > 0) {
-        // Cache with longer TTL and dependencies
-        const entityIds = entities.map(entity => `${entity.entity_type}:${entity.id}`);
-        await this.cache.set(
-          cacheKey,
-          entities,
-          cacheTTL * 3, // 15 minutes TTL for rankings
-          entityIds
-        );
-      }
-
-      return entities || [];
-    } catch (error) {
-      console.error('Ranked entities query failed:', error);
-      return [];
-    }
-  }
-
-  // Optimized entity rank calculation with caching
-  async calculateEntityRank(entityType, worldId, entityId, rankKey) {
-    // Validate all inputs before SQL execution
-    const sanitizedEntityType = InputValidator.sanitizeEntityType(entityType);
-    const sanitizedWorldId = InputValidator.sanitizeWorldId(worldId);
-    const sanitizedEntityId = InputValidator.sanitizeEntityId(entityId);
-    const sanitizedRankKey = InputValidator.sanitizeRankKey(rankKey);
-
-    const cacheKey = `rank:${sanitizedEntityType}:${sanitizedWorldId}:${sanitizedEntityId}:${sanitizedRankKey}`;
-
-    // Try cache first with longer TTL
-    let rankInfo = await this.cache.get(cacheKey);
-    if (rankInfo) {
-      return rankInfo;
-    }
-
-    try {
-      // Single optimized query to get both entity score and rank
-      const result = await this.prisma.$queryRaw`
-        WITH entity_score AS (
-          SELECT (rank_scores->>${sanitizedRankKey})::FLOAT as score
-          FROM entities
-          WHERE entity_type = ${sanitizedEntityType}
-            AND id = ${sanitizedEntityId}
-            AND world_id = ${sanitizedWorldId}
-            AND is_deleted = false
-            AND rank_scores ? ${sanitizedRankKey}
-        ),
-        rank_calculation AS (
-          SELECT
-            COUNT(*) FILTER (WHERE (e.rank_scores->>${sanitizedRankKey})::FLOAT > es.score) + 1 as rank,
-            COUNT(*) as total_entities
-          FROM entities e, entity_score es
-          WHERE e.entity_type = ${sanitizedEntityType}
-            AND e.world_id = ${sanitizedWorldId}
-            AND e.is_deleted = false
-            AND e.rank_scores ? ${sanitizedRankKey}
-        )
-        SELECT
-          es.score,
-          rc.rank,
-          rc.total_entities
-        FROM entity_score es, rank_calculation rc
-      `;
-
-      if (!result || result.length === 0) {
-        return {
-          entityId,
-          entityType,
-          worldId,
-          rankKey,
-          score: null,
-          rank: null,
-          totalEntities: 0
-        };
-      }
-
-      const { score, rank, total_entities } = result[0];
-
-      const rankInfo = {
-        entityId: sanitizedEntityId,
-        entityType: sanitizedEntityType,
-        worldId: sanitizedWorldId,
-        rankKey: sanitizedRankKey,
-        score: parseFloat(score),
-        rank: parseInt(rank),
-        totalEntities: parseInt(total_entities)
-      };
-
-      // Cache with longer TTL
-      await this.cache.set(cacheKey, rankInfo, cacheTTL * 3, [`${sanitizedEntityType}:${sanitizedEntityId}`]);
-
-      return rankInfo;
-
-    } catch (error) {
-      console.error('Calculate entity rank failed:', error);
       return {
-        entityId: sanitizedEntityId,
         entityType: sanitizedEntityType,
         worldId: sanitizedWorldId,
         rankKey: sanitizedRankKey,
-        score: null,
-        rank: null,
-        totalEntities: 0,
-        error: error.message
+        sortOrder: sanitizedSortOrder,
+        limit: sanitizedLimit,
+        cacheKey
       };
+    });
+
+    // Batch cache get
+    const cacheKeys = sanitizedRequests.map(req => req.cacheKey);
+    const cacheResults = await this.cache.mget(cacheKeys);
+
+    // Identify cache misses
+    const cacheMisses = [];
+    const results = new Array(requests.length);
+
+    sanitizedRequests.forEach((req, index) => {
+      const cached = cacheResults.get(req.cacheKey);
+      if (cached) {
+        results[index] = cached;
+      } else {
+        cacheMisses.push({ ...req, index });
+      }
+    });
+
+    // Process cache misses
+    if (cacheMisses.length > 0) {
+      const dbResults = await Promise.all(
+        cacheMisses.map(async (miss) => {
+          try {
+            const entities = await this.prisma.$queryRaw`
+              SELECT * FROM get_ranked_entities(
+                ${miss.entityType}::TEXT,
+                ${miss.worldId}::INT,
+                ${miss.rankKey}::TEXT,
+                ${miss.sortOrder}::TEXT,
+                ${miss.limit}::INT
+              )
+            `;
+
+            return { index: miss.index, entities: entities || [] };
+          } catch (error) {
+            console.error('Ranked entities query failed:', error);
+            return { index: miss.index, entities: [] };
+          }
+        })
+      );
+
+      // Batch cache set for all DB results
+      const cacheEntries = [];
+      dbResults.forEach(({ index, entities }) => {
+        results[index] = entities;
+        const req = sanitizedRequests[index];
+
+        if (entities && entities.length > 0) {
+          const entityIds = entities.map(entity => `${entity.entity_type}:${entity.id}`);
+          // Store with dependencies for cache invalidation
+          cacheEntries.push([req.cacheKey, entities, entityIds]);
+        } else {
+          cacheEntries.push([req.cacheKey, entities, []]);
+        }
+      });
+
+      if (cacheEntries.length > 0) {
+        // Set with longer TTL for rankings
+        await this.cache.mset(cacheEntries.map(([key, val]) => [key, val]), cacheTTL * 3);
+      }
     }
+
+    return results;
   }
 
-  // Optimized name search with better indexing
-  async searchByName(entityType, namePattern, worldId = null, limit = 100) {
-    // Validate all inputs before SQL execution
-    const sanitizedEntityType = InputValidator.sanitizeEntityType(entityType);
-    const sanitizedNamePattern = InputValidator.sanitizeNamePattern(namePattern);
-    const sanitizedWorldId = worldId !== null ? InputValidator.sanitizeWorldId(worldId) : null;
-    const sanitizedLimit = InputValidator.sanitizeLimit(limit);
+  // Batch calculate entity ranks with batched cache operations
+  async batchCalculateEntityRank(requests) {
+    if (requests.length === 0) return [];
 
-    const cacheKey = sanitizedWorldId
-      ? `search:${sanitizedEntityType}:${sanitizedWorldId}:${sanitizedNamePattern}:${sanitizedLimit}`
-      : `search:${sanitizedEntityType}:all:${sanitizedNamePattern}:${sanitizedLimit}`;
+    // Sanitize and build cache keys for all requests
+    const sanitizedRequests = requests.map(({ entityType, worldId, entityId, rankKey }) => {
+      const sanitizedEntityType = InputValidator.sanitizeEntityType(entityType);
+      const sanitizedWorldId = InputValidator.sanitizeWorldId(worldId);
+      const sanitizedEntityId = InputValidator.sanitizeEntityId(entityId);
+      const sanitizedRankKey = InputValidator.sanitizeRankKey(rankKey);
+      const cacheKey = `rank:${sanitizedEntityType}:${sanitizedWorldId}:${sanitizedEntityId}:${sanitizedRankKey}`;
 
-    let entities = await this.cache.get(cacheKey);
-    if (entities) {
-      return entities;
-    }
+      return {
+        entityType: sanitizedEntityType,
+        worldId: sanitizedWorldId,
+        entityId: sanitizedEntityId,
+        rankKey: sanitizedRankKey,
+        cacheKey
+      };
+    });
 
-    try {
-      const entities = await this.prisma.$queryRaw`
-        SELECT * FROM get_entities_by_name(
-          ${sanitizedEntityType}::TEXT,
-          ${sanitizedWorldId}::INT,
-          ${sanitizedNamePattern}::TEXT,
-          ${sanitizedLimit}::INT
-        )
-      `;
+    // Batch cache get
+    const cacheKeys = sanitizedRequests.map(req => req.cacheKey);
+    const cacheResults = await this.cache.mget(cacheKeys);
 
-      if (entities && entities.length > 0) {
-        const entityIds = entities.map(entity => `${entity.entity_type}:${entity.id}`);
-        await this.cache.set(cacheKey, entities, cacheTTL, entityIds);
+    // Identify cache misses
+    const cacheMisses = [];
+    const results = new Array(requests.length);
+
+    sanitizedRequests.forEach((req, index) => {
+      const cached = cacheResults.get(req.cacheKey);
+      if (cached) {
+        results[index] = cached;
+      } else {
+        cacheMisses.push({ ...req, index });
       }
+    });
 
-      return entities || [];
-    } catch (error) {
-      console.error('Name search query failed:', error);
-      return [];
+    // Process cache misses
+    if (cacheMisses.length > 0) {
+      const dbResults = await Promise.all(
+        cacheMisses.map(async (miss) => {
+          try {
+            const result = await this.prisma.$queryRaw`
+              WITH entity_score AS (
+                SELECT (rank_scores->>${miss.rankKey})::FLOAT as score
+                FROM entities
+                WHERE entity_type = ${miss.entityType}
+                  AND id = ${miss.entityId}
+                  AND world_id = ${miss.worldId}
+                  AND is_deleted = false
+                  AND rank_scores ? ${miss.rankKey}
+              ),
+              rank_calculation AS (
+                SELECT
+                  COUNT(*) FILTER (WHERE (e.rank_scores->>${miss.rankKey})::FLOAT > es.score) + 1 as rank,
+                  COUNT(*) as total_entities
+                FROM entities e, entity_score es
+                WHERE e.entity_type = ${miss.entityType}
+                  AND e.world_id = ${miss.worldId}
+                  AND e.is_deleted = false
+                  AND e.rank_scores ? ${miss.rankKey}
+              )
+              SELECT
+                es.score,
+                rc.rank,
+                rc.total_entities
+              FROM entity_score es, rank_calculation rc
+            `;
+
+            if (!result || result.length === 0) {
+              return {
+                index: miss.index,
+                rankInfo: {
+                  entityId: miss.entityId,
+                  entityType: miss.entityType,
+                  worldId: miss.worldId,
+                  rankKey: miss.rankKey,
+                  score: null,
+                  rank: null,
+                  totalEntities: 0
+                }
+              };
+            }
+
+            const { score, rank, total_entities } = result[0];
+            const rankInfo = {
+              entityId: miss.entityId,
+              entityType: miss.entityType,
+              worldId: miss.worldId,
+              rankKey: miss.rankKey,
+              score: parseFloat(score),
+              rank: parseInt(rank),
+              totalEntities: parseInt(total_entities)
+            };
+
+            return { index: miss.index, rankInfo };
+          } catch (error) {
+            console.error('Calculate entity rank failed:', error);
+            return {
+              index: miss.index,
+              rankInfo: {
+                entityId: miss.entityId,
+                entityType: miss.entityType,
+                worldId: miss.worldId,
+                rankKey: miss.rankKey,
+                score: null,
+                rank: null,
+                totalEntities: 0,
+                error: error.message
+              }
+            };
+          }
+        })
+      );
+
+      // Batch cache set for all DB results
+      const cacheEntries = [];
+      dbResults.forEach(({ index, rankInfo }) => {
+        results[index] = rankInfo;
+        const req = sanitizedRequests[index];
+        cacheEntries.push([req.cacheKey, rankInfo]);
+      });
+
+      if (cacheEntries.length > 0) {
+        await this.cache.mset(cacheEntries, cacheTTL * 3);
+      }
     }
+
+    return results;
+  }
+
+  // Batch search by name with batched cache operations
+  async batchSearchByName(requests) {
+    if (requests.length === 0) return [];
+
+    // Sanitize and build cache keys for all requests
+    const sanitizedRequests = requests.map(({ entityType, namePattern, worldId = null, limit = 100 }) => {
+      const sanitizedEntityType = InputValidator.sanitizeEntityType(entityType);
+      const sanitizedNamePattern = InputValidator.sanitizeNamePattern(namePattern);
+      const sanitizedWorldId = worldId !== null ? InputValidator.sanitizeWorldId(worldId) : null;
+      const sanitizedLimit = InputValidator.sanitizeLimit(limit);
+
+      const cacheKey = sanitizedWorldId
+        ? `search:${sanitizedEntityType}:${sanitizedWorldId}:${sanitizedNamePattern}:${sanitizedLimit}`
+        : `search:${sanitizedEntityType}:all:${sanitizedNamePattern}:${sanitizedLimit}`;
+
+      return {
+        entityType: sanitizedEntityType,
+        namePattern: sanitizedNamePattern,
+        worldId: sanitizedWorldId,
+        limit: sanitizedLimit,
+        cacheKey
+      };
+    });
+
+    // Batch cache get
+    const cacheKeys = sanitizedRequests.map(req => req.cacheKey);
+    const cacheResults = await this.cache.mget(cacheKeys);
+
+    // Identify cache misses
+    const cacheMisses = [];
+    const results = new Array(requests.length);
+
+    sanitizedRequests.forEach((req, index) => {
+      const cached = cacheResults.get(req.cacheKey);
+      if (cached) {
+        results[index] = cached;
+      } else {
+        cacheMisses.push({ ...req, index });
+      }
+    });
+
+    // Process cache misses
+    if (cacheMisses.length > 0) {
+      const dbResults = await Promise.all(
+        cacheMisses.map(async (miss) => {
+          try {
+            const entities = await this.prisma.$queryRaw`
+              SELECT * FROM get_entities_by_name(
+                ${miss.entityType}::TEXT,
+                ${miss.namePattern}::TEXT,
+                ${miss.worldId}::INT,
+                ${miss.limit}::INT
+              )
+            `;
+
+            return { index: miss.index, entities: entities || [] };
+          } catch (error) {
+            console.error('Name search query failed:', error);
+            return { index: miss.index, entities: [] };
+          }
+        })
+      );
+
+      // Batch cache set for all DB results
+      const cacheEntries = [];
+      dbResults.forEach(({ index, entities }) => {
+        results[index] = entities;
+        const req = sanitizedRequests[index];
+
+        if (entities && entities.length > 0) {
+          const entityIds = entities.map(entity => `${entity.entity_type}:${entity.id}`);
+          cacheEntries.push([req.cacheKey, entities, entityIds]);
+        } else {
+          cacheEntries.push([req.cacheKey, entities, []]);
+        }
+      });
+
+      if (cacheEntries.length > 0) {
+        await this.cache.mset(cacheEntries.map(([key, val]) => [key, val]), cacheTTL);
+      }
+    }
+
+    return results;
   }
 }

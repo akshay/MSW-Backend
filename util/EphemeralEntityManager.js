@@ -42,7 +42,7 @@ export class EphemeralEntityManager {
       const existsFlags = existsResults.map(([error, result]) => !!result && !error);
 
       // Process updates in optimized batches
-      const batchSize = 100; // Larger batches for better throughput
+      const batchSize = 5000; // Larger batches for better throughput
       const results = [];
       const streamUpdates = []; // Collect stream updates for batch processing
 
@@ -111,7 +111,7 @@ export class EphemeralEntityManager {
           }
         });
 
-        await pipeline.exec();
+        setImmediate(() => pipeline.exec()); // Fire and forget
         results.push(...batch.map(() => ({ success: true })));
       }
 

@@ -4,7 +4,7 @@ import { streamRedis, cacheTTL } from '../config.js';
 export class StreamManager {
   constructor() {
     this.redis = streamRedis;
-    this.worldInstanceTTL = cacheTTL / 100; // 3 seconds
+    this.worldInstanceTTL = cacheTTL / 10; // 30 seconds
   }
 
   // Get world instance association key
@@ -46,7 +46,7 @@ export class StreamManager {
         pipeline.expire(`stream:${streamId}`, cacheTTL);
       });
 
-      await pipeline.exec();
+      setImmediate(() => pipeline.exec()); // Fire and forget
 
       return streamUpdates.map(() => ({ success: true }));
     } catch (error) {
@@ -63,6 +63,7 @@ export class StreamManager {
 
     // Group by stream ID for efficiency
     const streamGroups = streamCommands.reduce((groups, cmd) => {
+      cmd.streamId = `entity:${cmd.entityType}:${cmd.worldId}:${cmd.entityId}`;
       (groups[cmd.streamId] = groups[cmd.streamId] || []).push(cmd);
       return groups;
     }, {});
@@ -72,21 +73,19 @@ export class StreamManager {
 
       Object.entries(streamGroups).forEach(([streamId, commands]) => {
         commands.forEach(cmd => {
-          cmd.messages.forEach(msg => {
-            pipeline.xadd(
-              `stream:${streamId}`,
-              '*',
-              'data', JSON.stringify(msg),
-              'timestamp', Date.now()
-            );
-          });
+          pipeline.xadd(
+            `stream:${streamId}`,
+            '*',
+            'data', JSON.stringify(cmd.message),
+            'timestamp', Date.now()
+          );
         });
 
         // Set expiration for each stream
-        pipeline.expire(`stream:${streamId}`, 60);
+        pipeline.expire(`stream:${streamId}`, cacheTTL);
       });
 
-      await pipeline.exec();
+      setImmediate(() => pipeline.exec()); // Fire and forget
 
       return streamCommands.map(() => ({ success: true }));
     } catch (error) {
@@ -104,6 +103,7 @@ export class StreamManager {
     try {
       // Handle world instance associations in parallel
       const worldInstancePromises = pullCommands.map(async (cmd) => {
+        cmd.streamId = `entity:${cmd.entityType}:${cmd.worldId}:${cmd.entityId}`;
         const worldInstanceKey = this.getWorldInstanceKey(cmd.streamId);
         const currentAssociation = await this.redis.get(worldInstanceKey);
         
@@ -131,7 +131,7 @@ export class StreamManager {
           `stream:${cmd.streamId}`,
           cmd.timestamp || '-',
           '+',
-          'COUNT', 1000
+          'COUNT', cmd.count || 1000
         );
       });
 
