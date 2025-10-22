@@ -3,7 +3,8 @@
 // Mock dependencies
 const mockCache = {
   get: jest.fn(),
-  set: jest.fn()
+  set: jest.fn(),
+  defaultTTL: 500  // 500 / 100 = 5 seconds for sequence number TTL
 };
 
 const mockStreamManager = {
@@ -56,7 +57,7 @@ jest.mock('../config.js', () => ({
 // Mock HybridCacheManager
 jest.mock('../util/HybridCacheManager.js', () => ({
   HybridCacheManager: jest.fn(() => ({
-    defaultTTL: 3,
+    defaultTTL: 500,  // 500 / 100 = 5 seconds for sequence number TTL
     get: jest.fn(),
     set: jest.fn()
   }))
