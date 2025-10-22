@@ -102,8 +102,18 @@ export class PersistentEntityManager {
       requestGroups.get(groupKey).push({ ...request, index });
     });
 
-    // Batch check cache for all entities (newest + versioned)
-    const cacheResults = await this.cache.mget(cacheKeys);
+    // Get world instance association keys for MGET
+    const worldInstanceKeys = requests.map(({ entityType, entityId, worldId }) => {
+      const streamId = `entity:${entityType}:${worldId}:${entityId}`;
+      return this.streamManager.getWorldInstanceKey(streamId);
+    });
+
+    // Batch check cache for all entities (newest + versioned) in parallel with world instance fetch
+    const [cacheResults, worldInstanceIds] = await Promise.all([
+      this.cache.mget(cacheKeys),
+      this.streamManager.redis.mget(worldInstanceKeys)
+    ]);
+
     const resultMap = new Map();
     const cacheMisses = [];
 
@@ -198,12 +208,22 @@ export class PersistentEntityManager {
 
       // Batch update cache
       if (allCacheEntries.length > 0) {
-        await this.cache.mset(allCacheEntries, this.cache.defaultTTL);
+        setImmediate(() => this.cache.mset(allCacheEntries, this.cache.defaultTTL));
       }
     }
 
-    // Return results in original order
-    return requests.map((_, index) => resultMap.get(index) || InputValidator.NULL_MARKER);
+    // Return results in original order with worldInstanceId
+    return requests.map((_, index) => {
+      const entity = resultMap.get(index) || InputValidator.NULL_MARKER;
+      const worldInstanceId = worldInstanceIds[index];
+
+      // Add worldInstanceId to the entity (empty string if no association exists)
+      if (entity !== InputValidator.NULL_MARKER) {
+        entity.worldInstanceId = worldInstanceId || '';
+      }
+
+      return entity;
+    });
   }
 
   async batchSavePartial(updates) {

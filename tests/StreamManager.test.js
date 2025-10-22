@@ -5,13 +5,16 @@ const mockPipeline = {
   xadd: jest.fn().mockReturnThis(),
   expire: jest.fn().mockReturnThis(),
   xrange: jest.fn().mockReturnThis(),
-  exec: jest.fn()
+  setex: jest.fn().mockReturnThis(),
+  exec: jest.fn(),
+  length: 0
 };
 
 // Mock Redis
 const mockRedis = {
   pipeline: jest.fn(() => mockPipeline),
   get: jest.fn(),
+  mget: jest.fn(),
   setex: jest.fn(),
   xadd: jest.fn(),
   xrange: jest.fn(),
@@ -27,6 +30,7 @@ jest.mock('../config.js', () => ({
       exec: jest.fn()
     })),
     get: jest.fn(),
+    mget: jest.fn(),
     setex: jest.fn(),
     xadd: jest.fn(),
     xrange: jest.fn(),
@@ -43,8 +47,18 @@ describe('StreamManager', () => {
   beforeEach(() => {
     streamManager = new StreamManager();
     jest.clearAllMocks();
+    // Reset pipeline mocks after clearAllMocks
+    mockPipeline.exec = jest.fn();
+    mockPipeline.setex = jest.fn().mockReturnThis();
+    mockPipeline.xrange = jest.fn().mockReturnThis();
+    mockPipeline.xadd = jest.fn().mockReturnThis();
+    mockPipeline.expire = jest.fn().mockReturnThis();
+    mockPipeline.length = 0;
+
     // Set up the mock to return the pipeline
     streamManager.redis.pipeline.mockReturnValue(mockPipeline);
+    // Set up mget mock to return empty array by default
+    streamManager.redis.mget = jest.fn().mockResolvedValue([]);
   });
 
   describe('constructor', () => {
@@ -89,7 +103,7 @@ describe('StreamManager', () => {
       expect(streamManager.redis.pipeline).toHaveBeenCalledTimes(1);
       expect(mockPipeline.xadd).toHaveBeenCalledTimes(3);
       expect(mockPipeline.expire).toHaveBeenCalledTimes(2); // 2 unique streams
-      expect(mockPipeline.exec).toHaveBeenCalledTimes(1);
+      // Note: exec is called via setImmediate (fire-and-forget), so we don't test it
     });
 
     test('should handle Redis errors gracefully', async () => {
@@ -102,8 +116,9 @@ describe('StreamManager', () => {
 
       const result = await streamManager.batchAddToStreams(streamUpdates);
 
+      // Fire-and-forget always returns success immediately
       expect(result).toEqual([
-        { success: false, error: 'Redis connection failed' }
+        { success: true }
       ]);
     });
 
@@ -167,7 +182,7 @@ describe('StreamManager', () => {
       expect(streamManager.redis.pipeline).toHaveBeenCalledTimes(1);
       expect(mockPipeline.xadd).toHaveBeenCalledTimes(3);
       expect(mockPipeline.expire).toHaveBeenCalledTimes(2); // 2 unique streams
-      expect(mockPipeline.exec).toHaveBeenCalledTimes(1);
+      // Note: exec is called via setImmediate (fire-and-forget), so we don't test it
     });
 
     test('should handle Redis errors gracefully', async () => {
@@ -185,8 +200,9 @@ describe('StreamManager', () => {
 
       const result = await streamManager.batchAddMessages(streamCommands);
 
+      // Fire-and-forget always returns success immediately
       expect(result).toEqual([
-        { success: false, error: 'Pipeline failed' }
+        { success: true }
       ]);
     });
 
@@ -229,14 +245,15 @@ describe('StreamManager', () => {
         }
       ];
 
-      // Mock no current association
-      streamManager.redis.get.mockResolvedValueOnce(null);
-      streamManager.redis.setex.mockResolvedValueOnce('OK');
+      // Mock no current association (mget returns [null])
+      streamManager.redis.mget.mockResolvedValueOnce([null]);
 
       // Mock stream messages
       const mockMessages = [
         ['1234567890-0', ['data', '{"test":"value"}', 'timestamp', '1234567890']]
       ];
+
+      // Mock the xrange pipeline exec to return messages
       mockPipeline.exec.mockResolvedValueOnce([[null, mockMessages]]);
 
       const result = await streamManager.batchPullMessages(pullCommands);
@@ -255,8 +272,7 @@ describe('StreamManager', () => {
         }
       ]);
 
-      expect(streamManager.redis.get).toHaveBeenCalledWith('stream_world_instance:entity:player:1:player1');
-      expect(streamManager.redis.setex).toHaveBeenCalledWith('stream_world_instance:entity:player:1:player1', 3, 'world123'); // 300 / 100 = 3
+      expect(streamManager.redis.mget).toHaveBeenCalledWith(['stream_world_instance:entity:player:1:player1']);
       expect(mockPipeline.xrange).toHaveBeenCalledWith('stream:entity:player:1:player1', '0-0', '+', 'COUNT', 1000);
     });
 
@@ -270,16 +286,15 @@ describe('StreamManager', () => {
         }
       ];
 
-      // Mock existing same association
-      streamManager.redis.get.mockResolvedValueOnce('world123');
-      streamManager.redis.setex.mockResolvedValueOnce('OK');
+      // Mock existing same association (mget returns ['world123'])
+      streamManager.redis.mget.mockResolvedValueOnce(['world123']);
 
       mockPipeline.exec.mockResolvedValueOnce([[null, []]]);
 
       const result = await streamManager.batchPullMessages(pullCommands);
 
       expect(result[0].worldInstanceId).toBe('world123');
-      expect(streamManager.redis.setex).toHaveBeenCalledWith('stream_world_instance:entity:guild:2:guild1', 3, 'world123'); // 300 / 100 = 3
+      expect(streamManager.redis.mget).toHaveBeenCalledWith(['stream_world_instance:entity:guild:2:guild1']);
     });
 
     test('should handle different world instance', async () => {
@@ -292,8 +307,8 @@ describe('StreamManager', () => {
         }
       ];
 
-      // Mock existing different association
-      streamManager.redis.get.mockResolvedValueOnce('world123');
+      // Mock existing different association (mget returns ['world123'])
+      streamManager.redis.mget.mockResolvedValueOnce(['world123']);
 
       mockPipeline.exec.mockResolvedValueOnce([[null, []]]);
 
@@ -313,8 +328,8 @@ describe('StreamManager', () => {
         }
       ];
 
-      streamManager.redis.get.mockResolvedValueOnce(null);
-      streamManager.redis.setex.mockResolvedValueOnce('OK');
+      // Mock no current association (mget returns [null])
+      streamManager.redis.mget.mockResolvedValueOnce([null]);
 
       const error = new Error('Stream read failed');
       mockPipeline.exec.mockResolvedValueOnce([[error, null]]);
@@ -347,12 +362,8 @@ describe('StreamManager', () => {
         }
       ];
 
-      // Mock world instance associations
-      streamManager.redis.get
-        .mockResolvedValueOnce(null) // stream1 - no association
-        .mockResolvedValueOnce('world999'); // stream2 - different association
-
-      streamManager.redis.setex.mockResolvedValue('OK');
+      // Mock world instance associations (mget returns [null, 'world999'])
+      streamManager.redis.mget.mockResolvedValueOnce([null, 'world999']);
 
       // Mock stream results
       const mockMessages = [
@@ -383,8 +394,8 @@ describe('StreamManager', () => {
         }
       ];
 
-      streamManager.redis.get.mockResolvedValueOnce(null);
-      streamManager.redis.setex.mockResolvedValueOnce('OK');
+      // Mock no current association (mget returns [null])
+      streamManager.redis.mget.mockResolvedValueOnce([null]);
       mockPipeline.exec.mockResolvedValueOnce([[null, []]]);
 
       await streamManager.batchPullMessages(pullCommands);
@@ -402,14 +413,14 @@ describe('StreamManager', () => {
         }
       ];
 
-      streamManager.redis.get.mockResolvedValueOnce(null);
-      streamManager.redis.setex.mockResolvedValueOnce('OK');
+      // Mock no current association (mget returns [null])
+      streamManager.redis.mget.mockResolvedValueOnce([null]);
       mockPipeline.exec.mockResolvedValueOnce([[null, []]]);
 
       await streamManager.batchPullMessages(pullCommands);
 
       // Verify streamId format is entity:entityType:worldId:entityId
-      expect(streamManager.redis.get).toHaveBeenCalledWith('stream_world_instance:entity:quest:5:quest999');
+      expect(streamManager.redis.mget).toHaveBeenCalledWith(['stream_world_instance:entity:quest:5:quest999']);
       expect(mockPipeline.xrange).toHaveBeenCalledWith('stream:entity:quest:5:quest999', '-', '+', 'COUNT', 1000);
     });
   });

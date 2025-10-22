@@ -38,8 +38,15 @@ const mockPrisma = {
   $queryRaw: jest.fn()
 };
 
+// Create mget mock that persists across clearAllMocks
+const mockMget = jest.fn().mockResolvedValue([]);
+
 const mockStreamManager = {
-  batchAddToStreams: jest.fn()
+  batchAddToStreams: jest.fn(),
+  getWorldInstanceKey: jest.fn((streamId) => `stream_world_instance:${streamId}`),
+  redis: {
+    mget: mockMget
+  }
 };
 
 describe('PersistentEntityManager', () => {
@@ -49,6 +56,8 @@ describe('PersistentEntityManager', () => {
     manager = new PersistentEntityManager(mockCache, mockStreamManager);
     manager.prisma = mockPrisma;
     jest.clearAllMocks();
+    // Reset mget mock after clearAllMocks
+    mockMget.mockResolvedValue([]);
   });
 
   describe('getCacheKey', () => {
@@ -174,6 +183,11 @@ describe('PersistentEntityManager', () => {
   });
 
   describe('batchLoad', () => {
+    beforeEach(() => {
+      // Mock setImmediate to execute immediately for testing
+      global.setImmediate = jest.fn((callback) => callback());
+    });
+
     it('should return empty array for empty requests', async () => {
       const result = await manager.batchLoad([]);
       expect(result).toEqual([]);
@@ -195,8 +209,8 @@ describe('PersistentEntityManager', () => {
       const result = await manager.batchLoad(requests);
 
       expect(result).toEqual([
-        { id: 'user1', name: 'Player1' },
-        { id: 'user2', name: 'Player2' }
+        { id: 'user1', name: 'Player1', worldInstanceId: '' },
+        { id: 'user2', name: 'Player2', worldInstanceId: '' }
       ]);
       expect(mockCache.mget).toHaveBeenCalledWith([
         'entity:character:1:user1',
@@ -217,7 +231,7 @@ describe('PersistentEntityManager', () => {
       const result = await manager.batchLoad(requests);
 
       expect(result).toEqual([
-        { id: 'user1', entityType: 'character', worldId: 1, name: 'Player1' }
+        { id: 'user1', entityType: 'character', worldId: 1, name: 'Player1', worldInstanceId: '' }
       ]);
       expect(mockPrisma.entity.findMany).toHaveBeenCalledWith({
         where: {

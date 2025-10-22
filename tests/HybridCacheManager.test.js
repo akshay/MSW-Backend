@@ -274,22 +274,14 @@ describe('HybridCacheManager', () => {
     });
 
     test('should remove all dependent keys from memory cache', async () => {
-      const consoleSpy = jest.spyOn(console, 'log').mockImplementation();
-
       await hybridManager.invalidateEntity(entityId);
-
-      expect(consoleSpy).toHaveBeenCalledWith(`Invalidating ${cacheKeys.length} cache entries for entity ${entityId}`);
       
       cacheKeys.forEach(key => {
         expect(memoryCache.del).toHaveBeenCalledWith(key);
       });
-
-      consoleSpy.mockRestore();
     });
 
     test('should batch remove from KV cache using pipeline', (done) => {
-      const consoleSpy = jest.spyOn(console, 'log').mockImplementation();
-
       hybridManager.invalidateEntity(entityId);
 
       setImmediate(() => {
@@ -299,7 +291,6 @@ describe('HybridCacheManager', () => {
             expect(mockPipeline.del).toHaveBeenCalledWith(key);
           });
           expect(mockPipeline.exec).toHaveBeenCalled();
-          consoleSpy.mockRestore();
           done();
         });
       });
@@ -315,12 +306,7 @@ describe('HybridCacheManager', () => {
     });
 
     test('should handle entity with no dependencies', async () => {
-      const consoleSpy = jest.spyOn(console, 'log').mockImplementation();
-
       await hybridManager.invalidateEntity('nonexistent');
-
-      expect(consoleSpy).toHaveBeenCalledWith(`Invalidating 0 cache entries for entity nonexistent`);
-      consoleSpy.mockRestore();
     });
   });
 
@@ -339,18 +325,12 @@ describe('HybridCacheManager', () => {
     });
 
     test('should batch invalidate all dependent keys', async () => {
-      const consoleSpy = jest.spyOn(console, 'log').mockImplementation();
-
       await hybridManager.invalidateEntities(entityIds);
 
-      expect(consoleSpy).toHaveBeenCalledWith(`Batch invalidating 3 cache entries for 2 entities`);
-      
       // Should remove all unique keys
       expect(memoryCache.del).toHaveBeenCalledWith('key1');
       expect(memoryCache.del).toHaveBeenCalledWith('key2');
       expect(memoryCache.del).toHaveBeenCalledWith('key3');
-
-      consoleSpy.mockRestore();
     });
 
     test('should clean up all tracking maps', async () => {

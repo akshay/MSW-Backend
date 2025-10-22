@@ -16,9 +16,16 @@ const mockRedis = {
   expire: jest.fn()
 };
 
+// Create mget mock that persists across clearAllMocks
+const mockMget = jest.fn().mockResolvedValue([]);
+
 // Mock StreamManager
 const mockStreamManager = {
-  batchAddToStreams: jest.fn()
+  batchAddToStreams: jest.fn(),
+  getWorldInstanceKey: jest.fn((streamId) => `stream_world_instance:${streamId}`),
+  redis: {
+    mget: mockMget
+  }
 };
 
 jest.mock('../config.js', () => ({
@@ -43,7 +50,11 @@ describe('EphemeralEntityManager', () => {
   beforeEach(() => {
     ephemeralManager = new EphemeralEntityManager(mockStreamManager);
     jest.clearAllMocks();
+    // Reset pipeline exec mock after clearAllMocks
+    mockPipeline.exec = jest.fn();
     ephemeralManager.redis.pipeline.mockReturnValue(mockPipeline);
+    // Reset mget mock after clearAllMocks
+    mockMget.mockResolvedValue([]);
   });
 
   describe('constructor', () => {
@@ -192,9 +203,7 @@ describe('EphemeralEntityManager', () => {
       // Mock all entities as new
       const existsResults = Array.from({ length: 150 }, () => [null, null]);
       mockPipeline.exec
-        .mockResolvedValueOnce(existsResults) // existence check
-        .mockResolvedValueOnce([]) // first batch
-        .mockResolvedValueOnce([]); // second batch
+        .mockResolvedValueOnce(existsResults); // existence check
 
       mockStreamManager.batchAddToStreams.mockResolvedValue([]);
 
@@ -203,8 +212,8 @@ describe('EphemeralEntityManager', () => {
       expect(result).toHaveLength(150);
       expect(result.every(r => r.success)).toBe(true);
 
-      // Should be called twice due to batch size of 100
-      expect(mockPipeline.exec).toHaveBeenCalledTimes(3); // 1 for exists + 2 for batches
+      // Should be called once for exists check (batch writes are fire-and-forget)
+      expect(mockPipeline.exec).toHaveBeenCalledTimes(1);
     });
 
     test('should handle Redis errors gracefully', async () => {
@@ -317,7 +326,10 @@ describe('EphemeralEntityManager', () => {
 
       const result = await ephemeralManager.batchLoad(requests);
 
-      expect(result).toEqual([mockEntity1, mockEntity2]);
+      expect(result).toEqual([
+        { ...mockEntity1, worldInstanceId: '' },
+        { ...mockEntity2, worldInstanceId: '' }
+      ]);
 
       expect(mockPipeline.call).toHaveBeenCalledWith('JSON.GET', 'ephemeral:player:1:user123');
       expect(mockPipeline.call).toHaveBeenCalledWith('JSON.GET', 'ephemeral:session:1:sess456');
@@ -357,7 +369,7 @@ describe('EphemeralEntityManager', () => {
 
       const result = await ephemeralManager.batchLoad(requests);
 
-      expect(result).toEqual([null, mockEntity]);
+      expect(result).toEqual([null, { ...mockEntity, worldInstanceId: '' }]);
     });
 
     test('should handle Redis pipeline failure', async () => {
@@ -405,7 +417,11 @@ describe('EphemeralEntityManager', () => {
 
       const result = await ephemeralManager.batchLoad(requests);
 
-      expect(result).toEqual([mockEntity1, null, mockEntity3]);
+      expect(result).toEqual([
+        { ...mockEntity1, worldInstanceId: '' },
+        null,
+        { ...mockEntity3, worldInstanceId: '' }
+      ]);
     });
   });
 });

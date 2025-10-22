@@ -4,7 +4,7 @@ import { streamRedis, cacheTTL } from '../config.js';
 export class StreamManager {
   constructor() {
     this.redis = streamRedis;
-    this.worldInstanceTTL = cacheTTL / 10; // 30 seconds
+    this.worldInstanceTTL = cacheTTL / 100; // 3 seconds
   }
 
   // Get world instance association key
@@ -101,33 +101,20 @@ export class StreamManager {
     if (pullCommands.length === 0) return [];
 
     try {
-      // Handle world instance associations in parallel
-      const worldInstancePromises = pullCommands.map(async (cmd) => {
+      // Set stream IDs for all commands
+      pullCommands.forEach(cmd => {
         cmd.streamId = `entity:${cmd.entityType}:${cmd.worldId}:${cmd.entityId}`;
-        const worldInstanceKey = this.getWorldInstanceKey(cmd.streamId);
-        const currentAssociation = await this.redis.get(worldInstanceKey);
-        
-        if (!currentAssociation) {
-          // No current association - create new one
-          await this.redis.setex(worldInstanceKey, this.worldInstanceTTL, cmd.worldInstanceId);
-          return cmd.worldInstanceId;
-        } else if (currentAssociation === cmd.worldInstanceId) {
-          // Same world instance - refresh TTL
-          await this.redis.setex(worldInstanceKey, this.worldInstanceTTL, cmd.worldInstanceId);
-          return cmd.worldInstanceId;
-        } else {
-          // Different world instance - return the currently associated one
-          return currentAssociation;
-        }
       });
 
-      const associatedWorldInstances = await Promise.all(worldInstancePromises);
+      // Get world instance association keys for MGET
+      const worldInstanceKeys = pullCommands.map(cmd =>
+        this.getWorldInstanceKey(cmd.streamId)
+      );
 
-      // Pull messages from streams in single pipeline
-      const pipeline = this.redis.pipeline();
-
+      // Create pipeline to pull messages from streams
+      const xrangePipeline = this.redis.pipeline();
       pullCommands.forEach(cmd => {
-        pipeline.xrange(
+        xrangePipeline.xrange(
           `stream:${cmd.streamId}`,
           cmd.timestamp || '-',
           '+',
@@ -135,7 +122,38 @@ export class StreamManager {
         );
       });
 
-      const results = await pipeline.exec();
+      // Execute MGET and xrange pipeline in parallel
+      const [currentAssociations, xrangeResults] = await Promise.all([
+        this.redis.mget(worldInstanceKeys),
+        xrangePipeline.exec()
+      ]);
+
+      // Create pipeline to set world instance associations
+      const setInstancePipeline = this.redis.pipeline();
+      const associatedWorldInstances = pullCommands.map((cmd, index) => {
+        const currentAssociation = currentAssociations[index];
+        const worldInstanceKey = this.getWorldInstanceKey(cmd.streamId);
+
+        if (!currentAssociation) {
+          // No current association - create new one
+          setInstancePipeline.setex(worldInstanceKey, this.worldInstanceTTL, cmd.worldInstanceId);
+          return cmd.worldInstanceId;
+        } else if (currentAssociation === cmd.worldInstanceId) {
+          // Same world instance - refresh TTL
+          setInstancePipeline.setex(worldInstanceKey, this.worldInstanceTTL, cmd.worldInstanceId);
+          return cmd.worldInstanceId;
+        } else {
+          // Different world instance - return the currently associated one
+          return currentAssociation;
+        }
+      });
+
+      // Execute the set pipeline (fire and forget if no sets were added)
+      if (setInstancePipeline.length > 0) {
+        setImmediate(() => setInstancePipeline.exec());
+      }
+
+      const results = xrangeResults;
 
       return pullCommands.map((cmd, index) => {
         const [error, messages] = results[index];

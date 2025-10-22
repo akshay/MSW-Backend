@@ -66,10 +66,10 @@ export class CommandProcessor {
       await this.validateAndDecryptRequest(payload);
 
       const { commands } = payload;
-      if (!commands) {
+      if (!commands || typeof commands !== 'object' || Array.isArray(commands)) {
         return { error: 'Invalid request: commands array required' };
       }
-      
+
       // Group commands by type for optimal batching
       this.groupCommandsByType(commands, payload.worldInstanceId);
       
@@ -106,7 +106,7 @@ export class CommandProcessor {
       throw new Error('Authentication failed: invalid auth token');
     }
 
-    // 2. Validate encrypted string length
+    // 2. Validate encrypted string
     if (!encrypted) {
       throw new Error('Invalid encrypted string: must be provided');
     }
@@ -171,14 +171,14 @@ export class CommandProcessor {
 
   async validateSequenceNumber(worldInstanceId, sequenceNumber) {
     const cacheKey = `sequence:${worldInstanceId}`;
-    
+
     try {
       // Get current sequence number from cache
       const currentSequence = await this.cache.get(cacheKey);
-      
+
       if (currentSequence !== null) {
         // Sequence number must be strictly increasing
-        if (sequenceNumber < currentSequence) {
+        if (sequenceNumber <= currentSequence) {
           throw new Error(`Invalid sequence number: ${sequenceNumber} must be greater than ${currentSequence}`);
         }
       }
@@ -198,19 +198,31 @@ export class CommandProcessor {
   groupCommandsByType(commands, worldInstanceId) {
     for (const cmd of Object.keys(commands)) {
       let array = commands[cmd];
+
+      // Validate that commands[cmd] is an array
+      if (!Array.isArray(array)) {
+        throw new Error(`Commands must be an array for type: ${cmd}`);
+      }
+
       for (let i = 0; i < array.length; i++) {
         const command = array[i];
+
+        // Validate that command is an object
+        if (typeof command !== 'object' || command === null) {
+          throw new Error(`Command ${i} must be an object`);
+        }
+
         command.originalIndex = i;
         command.type = cmd;
         command.worldInstanceId = worldInstanceId;
-      
+
         // Validate required fields
         if (!command.entityType) {
-          throw new Error(`Command ${index}: entityType is required`);
+          throw new Error(`Command ${i}: entityType is required`);
         }
-        
+
         if (command.worldId === undefined || command.worldId === null) {
-          throw new Error(`Command ${index}: worldId is required`);
+          throw new Error(`Command ${i}: worldId is required`);
         }
       }
     }

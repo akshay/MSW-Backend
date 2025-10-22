@@ -124,7 +124,7 @@ export class HybridCacheManager {
   async invalidateEntity(entityId) {
     const keysToInvalidate = this.dependencyMap.get(entityId) || new Set();
     
-    console.log(`Invalidating ${keysToInvalidate.size} cache entries for entity ${entityId}`);
+    // console.log(`Invalidating ${keysToInvalidate.size} cache entries for entity ${entityId}`);
 
     // Remove from memory cache
     for (const key of keysToInvalidate) {

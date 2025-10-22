@@ -139,26 +139,40 @@ export class EphemeralEntityManager {
     if (requests.length === 0) return [];
 
     try {
-      const keys = requests.map(({ entityType, entityId, worldId }) => 
+      const keys = requests.map(({ entityType, entityId, worldId }) =>
         this.getEphemeralKey(entityType, entityId, worldId)
       );
 
-      // Use single pipeline for all JSON.GET operations
-      const pipeline = this.redis.pipeline();
+      // Create pipeline for JSON.GET operations
+      const entityPipeline = this.redis.pipeline();
       keys.forEach(key => {
-        pipeline.call('JSON.GET', key);
+        entityPipeline.call('JSON.GET', key);
       });
 
-      const results = await pipeline.exec();
+      // Get world instance association keys for MGET
+      const worldInstanceKeys = requests.map(({ entityType, entityId, worldId }) => {
+        const streamId = `entity:${entityType}:${worldId}:${entityId}`;
+        return this.streamManager.getWorldInstanceKey(streamId);
+      });
+
+      // Execute entity pipeline and MGET in parallel
+      const [entityResults, worldInstanceIds] = await Promise.all([
+        entityPipeline.exec(),
+        this.streamManager.redis.mget(worldInstanceKeys)
+      ]);
 
       return requests.map((request, index) => {
-        const [error, result] = results[index];
-        
+        const [error, result] = entityResults[index];
+        const worldInstanceId = worldInstanceIds[index];
+
         if (error || !result) {
           return null;
         }
 
-        return JSON.parse(result);
+        const entity = JSON.parse(result);
+        // Add worldInstanceId to the entity (empty string if no association exists)
+        entity.worldInstanceId = worldInstanceId || '';
+        return entity;
       });
 
     } catch (error) {

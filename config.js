@@ -20,7 +20,7 @@ export const ephemeralRedis = new Redis(process.env.EPHEMERAL_REDIS_URL, {
   retryDelayOnFailover: 100,
   lazyConnect: true,
   maxmemory: '256mb',
-  'maxmemory-policy': 'noeviction'
+  'maxmemory-policy': 'allkeys-lru'
 });
 
 export const streamRedis = new Redis(process.env.STREAM_REDIS_URL, {

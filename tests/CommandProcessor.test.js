@@ -86,7 +86,7 @@ import * as nacl from '@stablelib/nacl';
 import * as base64 from '@stablelib/base64';
 
 // Get references to the mocked functions
-const mockBoxBefore = nacl.box;
+const mockBoxBefore = nacl.precomputeSharedKey;
 const mockBoxOpenAfternm = nacl.openSecretBox;
 const mockDecodeBase64 = base64.decode;
 const mockEncodeBase64 = base64.encode;
@@ -193,7 +193,7 @@ describe('CommandProcessor', () => {
       ).resolves.not.toThrow();
 
       expect(mockCache.get).toHaveBeenCalledWith('sequence:world123');
-      expect(mockCache.set).toHaveBeenCalledWith('sequence:world123', 1000, 3);
+      expect(mockCache.set).toHaveBeenCalledWith('sequence:world123', 1000, 5);
     });
 
     test('should accept increasing sequence number', async () => {
@@ -204,7 +204,7 @@ describe('CommandProcessor', () => {
         commandProcessor.validateSequenceNumber('world123', 1001)
       ).resolves.not.toThrow();
 
-      expect(mockCache.set).toHaveBeenCalledWith('sequence:world123', 1001, 3);
+      expect(mockCache.set).toHaveBeenCalledWith('sequence:world123', 1001, 5);
     });
 
     test('should reject non-increasing sequence number', async () => {
@@ -270,14 +270,6 @@ describe('CommandProcessor', () => {
       await expect(
         commandProcessor.validateAndDecryptRequest(invalidPayload)
       ).rejects.toThrow('Authentication failed: invalid auth token');
-    });
-
-    test('should reject invalid encrypted string length', async () => {
-      const invalidPayload = { ...validPayload, encrypted: 'short' };
-
-      await expect(
-        commandProcessor.validateAndDecryptRequest(invalidPayload)
-      ).rejects.toThrow('Invalid encrypted string: must be exactly 24 characters');
     });
 
     test('should reject missing nonce', async () => {
