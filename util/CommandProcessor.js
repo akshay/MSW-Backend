@@ -6,6 +6,8 @@ import { HybridCacheManager } from './HybridCacheManager.js';
 import { StreamManager } from './StreamManager.js';
 import { EphemeralEntityManager } from './EphemeralEntityManager.js';
 import { PersistentEntityManager } from './PersistentEntityManager.js';
+import { BackgroundPersistenceTask } from './BackgroundPersistenceTask.js';
+import { metrics } from './MetricsCollector.js';
 
 // Simple ASCII encode/decode functions for authentication
 export function encodeAscii(str) {
@@ -26,10 +28,40 @@ export class CommandProcessor {
     this.cache = new HybridCacheManager();
     this.streamManager = new StreamManager();
     this.ephemeralManager = new EphemeralEntityManager(this.streamManager);
-    this.persistentManager = new PersistentEntityManager(this.cache, this.streamManager);
-    
+    this.persistentManager = new PersistentEntityManager(this.cache, this.streamManager, this.ephemeralManager);
+
+    // Initialize background persistence task
+    this.backgroundTask = new BackgroundPersistenceTask(
+      this.ephemeralManager,
+      this.persistentManager,
+      {
+        intervalMs: 5000, // Run every 5 seconds
+        batchSize: 500,   // Process 500 entities per batch
+        lockTTL: 10       // Hold lock for 10 seconds max
+      }
+    );
+
     // Precompute decryption key from environment variables
     this.initializeDecryption();
+
+    // Start background persistence task
+    this.startBackgroundTasks();
+  }
+
+  startBackgroundTasks() {
+    console.log('Starting background tasks...');
+    this.backgroundTask.start();
+  }
+
+  stopBackgroundTasks() {
+    console.log('Stopping background tasks...');
+    if (this.backgroundTask) {
+      this.backgroundTask.stop();
+    }
+  }
+
+  getBackgroundTaskStats() {
+    return this.backgroundTask ? this.backgroundTask.getStats() : null;
   }
 
   initializeDecryption() {
@@ -60,8 +92,13 @@ export class CommandProcessor {
 
   async processCommands(payload) {
     const startTime = performance.now();
-    
+
     try {
+      // Track world instance request
+      if (payload.worldInstanceId) {
+        metrics.recordWorldInstanceRequest(payload.worldInstanceId);
+      }
+
       // Validate and decrypt the request
       await this.validateAndDecryptRequest(payload);
 
@@ -72,7 +109,7 @@ export class CommandProcessor {
 
       // Group commands by type for optimal batching
       this.groupCommandsByType(commands, payload.worldInstanceId);
-      
+
       // Process all command groups in parallel
       const results = await Promise.all([
         this.processBatchedLoads(commands.load || []),
@@ -83,17 +120,39 @@ export class CommandProcessor {
         this.processBatchedCalculateRank(commands.rank || []),
         this.processBatchedGetRankings(commands.top || [])
       ]);
-      
+
       // Reconstruct results in original command order
       const flatResults = results.flat();
       const orderedResults = this.reconstructOrderedResults(commands, flatResults);
-      
+
       const processingTime = performance.now() - startTime;
-      // console.log(`Processed ${flatResults.length} commands in ${processingTime}ms`);
-      
+
+      // Record command metrics
+      const commandCounts = {
+        load: commands.load?.length || 0,
+        save: commands.save?.length || 0,
+        send: commands.send?.length || 0,
+        recv: commands.recv?.length || 0,
+        search: commands.search?.length || 0,
+        rank: commands.rank?.length || 0,
+        top: commands.top?.length || 0
+      };
+
+      Object.entries(commandCounts).forEach(([type, count]) => {
+        if (count > 0) {
+          const avgDuration = processingTime / Object.values(commandCounts).reduce((a, b) => a + b, 0);
+          metrics.recordCommand(type, true, avgDuration, payload.worldInstanceId);
+        }
+      });
+
       return orderedResults;
     } catch (error) {
       console.error('Command processing failed:', error);
+
+      // Record error metric
+      const duration = performance.now() - startTime;
+      metrics.recordCommand('unknown', false, duration, payload.worldInstanceId);
+
       throw error;
     }
   }
@@ -360,7 +419,7 @@ export class CommandProcessor {
     });
 
     // This automatically adds to streams via PersistentEntityManager
-    const results = await this.persistentManager.batchSavePartial(updates);
+    const results = await this.ephemeralManager.batchSavePartial(updates);
 
     return commands.map((cmd, index) => ({
       originalIndex: cmd.originalIndex,

@@ -1,6 +1,7 @@
 // middleware/rateLimiter.js
 import { cacheRedis } from '../config.js';
 import { InputValidator } from './InputValidator.js';
+import { metrics } from './MetricsCollector.js';
 
 /**
  * Rate Limiter Middleware
@@ -171,6 +172,9 @@ export class RateLimiter {
         const violated = results.find(r => !r.allowed);
 
         if (violated) {
+          // Record blocked request
+          metrics.recordRateLimitBlock(sanitizedIp);
+
           // Determine which limit was violated
           const violationType = results.indexOf(violated) < 2 ? 'IP' : 'World Instance';
           const windowType = results.indexOf(violated) % 2 === 0 ? 'minute' : 'hour';
@@ -185,6 +189,9 @@ export class RateLimiter {
             resetAt: new Date(violated.resetAt).toISOString()
           });
         }
+
+        // Record allowed request
+        metrics.recordRateLimitAllow(sanitizedIp);
 
         // All checks passed - add rate limit headers
         const mostRestrictive = results.reduce((min, r) =>

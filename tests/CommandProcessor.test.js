@@ -19,8 +19,7 @@ const mockEphemeralManager = {
 };
 
 const mockPersistentManager = {
-  batchLoad: jest.fn(),
-  batchSavePartial: jest.fn()
+  batchLoad: jest.fn()
 };
 
 // Mock the classes that CommandProcessor imports first
@@ -41,8 +40,7 @@ jest.mock('../util/EphemeralEntityManager.js', () => ({
 
 jest.mock('../util/PersistentEntityManager.js', () => ({
   PersistentEntityManager: jest.fn(() => ({
-    batchLoad: jest.fn(),
-    batchSavePartial: jest.fn()
+    batchLoad: jest.fn()
   }))
 }));
 
@@ -440,8 +438,10 @@ describe('CommandProcessor', () => {
       ];
 
       // Mock the managers to return the correct number of results
-      mockEphemeralManager.batchSavePartial.mockResolvedValueOnce([{ success: true }]);
-      mockPersistentManager.batchSavePartial.mockResolvedValueOnce([{ success: true }]);
+      // First call for ephemeral saves, second call for persistent saves
+      mockEphemeralManager.batchSavePartial
+        .mockResolvedValueOnce([{ success: true }])
+        .mockResolvedValueOnce([{ success: true }]);
 
       const result = await commandProcessor.processBatchedSaves(commands);
 
@@ -457,7 +457,6 @@ describe('CommandProcessor', () => {
         result: { success: true }
       });
       expect(mockEphemeralManager.batchSavePartial).toHaveBeenCalled();
-      expect(mockPersistentManager.batchSavePartial).toHaveBeenCalled();
     });
 
     test('should extract rank scores for persistent entities', async () => {
@@ -475,7 +474,7 @@ describe('CommandProcessor', () => {
         }
       ];
 
-      mockPersistentManager.batchSavePartial.mockResolvedValueOnce([{ success: true }]);
+      mockEphemeralManager.batchSavePartial.mockResolvedValueOnce([{ success: true }]);
 
       const result = await commandProcessor.processBatchedSaves(commands);
 
@@ -485,7 +484,7 @@ describe('CommandProcessor', () => {
         type: 'save',
         result: { success: true }
       });
-      expect(mockPersistentManager.batchSavePartial).toHaveBeenCalledWith([{
+      expect(mockEphemeralManager.batchSavePartial).toHaveBeenCalledWith([{
         entityType: 'player',
         entityId: undefined,
         worldId: undefined,

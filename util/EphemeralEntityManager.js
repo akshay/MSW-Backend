@@ -1,5 +1,5 @@
 // src/entities/EphemeralEntityManager.js
-import { ephemeralRedis } from '../config.js';
+import { ephemeralRedis, config } from '../config.js';
 import { InputValidator } from './InputValidator.js';
 
 export class EphemeralEntityManager {
@@ -7,6 +7,9 @@ export class EphemeralEntityManager {
     this.redis = ephemeralRedis;
     this.streamManager = streamManager;
     this.checkRedisJSONSupport();
+    this.DIRTY_SET_KEY = 'ephemeral:dirty_entities'; // Set to track entities with pending updates
+    // Store the set of ephemeral-only entity types that should NOT be persisted
+    this.ephemeralOnlyTypes = new Set(config.entityTypes?.ephemeral || []);
   }
 
   async checkRedisJSONSupport() {
@@ -18,6 +21,11 @@ export class EphemeralEntityManager {
       console.error('RedisJSON module not available for ephemeral entities:', error);
       throw new Error('RedisJSON module required for ephemeral entity operations');
     }
+  }
+
+  // Check if an entity type is ephemeral-only (should not be persisted to DB)
+  isEphemeralOnly(entityType) {
+    return this.ephemeralOnlyTypes.has(entityType);
   }
 
   // Ephemeral key includes entityType and worldId
@@ -89,12 +97,19 @@ export class EphemeralEntityManager {
 
         const pipeline = this.redis.pipeline();
         const versionKeyIndices = []; // Track which pipeline commands are version increments
+        const dirtyKeys = []; // Track keys to add to dirty set
 
         batch.forEach((update, batchIndex) => {
           const { entityType, entityId, worldId, attributes } = update;
           const key = batchKeys[batchIndex];
           const exists = batchExists[batchIndex];
           const versionKey = `${key}:version`;
+
+          // Track this entity as dirty for background persistence
+          // Skip ephemeral-only entity types that should not be persisted to DB
+          if (!this.isEphemeralOnly(entityType)) {
+            dirtyKeys.push(`${entityType}:${worldId}:${entityId}`);
+          }
 
           // Separate attributes into updates and removals
           const attributesToSet = {};
@@ -189,6 +204,11 @@ export class EphemeralEntityManager {
 
         // Execute cache pipeline (fire and forget)
         setImmediate(() => cachePipeline.exec());
+
+        // Mark entities as dirty for background persistence
+        if (dirtyKeys.length > 0) {
+          setImmediate(() => this.redis.sadd(this.DIRTY_SET_KEY, ...dirtyKeys));
+        }
       }
 
       // Batch add to streams (fire-and-forget for performance)
@@ -301,6 +321,105 @@ export class EphemeralEntityManager {
     } catch (error) {
       console.error('Batch RedisJSON load failed:', error);
       return requests.map(() => null);
+    }
+  }
+
+  /**
+   * Get a batch of pending updates (dirty entities) for persistence
+   * @param {number} batchSize - Maximum number of entities to retrieve
+   * @returns {Promise<Array>} - Array of entity keys that need to be persisted
+   */
+  async getPendingUpdates(batchSize = 100) {
+    try {
+      // Use SPOP to atomically get and remove entities from the dirty set
+      // This prevents processing the same entity multiple times
+      const dirtyKeys = await this.redis.spop(this.DIRTY_SET_KEY, batchSize);
+
+      if (!dirtyKeys || dirtyKeys.length === 0) {
+        return [];
+      }
+
+      // Parse the keys and load the full entities
+      const requests = dirtyKeys.map(key => {
+        const [entityType, worldIdStr, entityId] = key.split(':');
+        return {
+          entityType,
+          entityId,
+          worldId: parseInt(worldIdStr)
+        };
+      });
+
+      // Load full entities from ephemeral storage
+      const entities = await this.batchLoad(requests);
+
+      // Filter out null entities and format for persistence
+      return entities
+        .map((entity, index) => {
+          if (!entity) return null;
+
+          const request = requests[index];
+          return {
+            entityType: request.entityType,
+            entityId: request.entityId,
+            worldId: request.worldId,
+            attributes: entity.attributes || {},
+            rankScores: entity.rankScores || {},
+            version: entity.version,
+            isCreate: false,
+            isDelete: false
+          };
+        })
+        .filter(entity => entity !== null);
+
+    } catch (error) {
+      console.error('Failed to get pending updates:', error);
+      return [];
+    }
+  }
+
+  /**
+   * Get count of pending updates
+   * @returns {Promise<number>} - Number of entities waiting to be persisted
+   */
+  async getPendingCount() {
+    try {
+      return await this.redis.scard(this.DIRTY_SET_KEY);
+    } catch (error) {
+      console.error('Failed to get pending count:', error);
+      return 0;
+    }
+  }
+
+  /**
+   * Flush specific entities from ephemeral storage after successful persistence
+   * @param {Array} entityKeys - Array of {entityType, entityId, worldId} objects
+   * @returns {Promise<void>}
+   */
+  async flushPersistedEntities(entityKeys) {
+    if (entityKeys.length === 0) return;
+
+    try {
+      const pipeline = this.redis.pipeline();
+
+      entityKeys.forEach(({ entityType, entityId, worldId }) => {
+        const key = this.getEphemeralKey(entityType, entityId, worldId);
+
+        // Remove the main entity
+        pipeline.call('JSON.DEL', key);
+
+        // Remove the version counter
+        pipeline.del(`${key}:version`);
+
+        // Note: We don't delete versioned entities (with :vN suffix)
+        // as they may still be useful for diff calculations
+        // They will expire naturally or be cleaned up by LRU
+      });
+
+      await pipeline.exec();
+      console.log(`Flushed ${entityKeys.length} persisted entities from ephemeral storage`);
+
+    } catch (error) {
+      console.error('Failed to flush persisted entities:', error);
     }
   }
 }

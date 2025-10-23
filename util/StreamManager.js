@@ -1,5 +1,6 @@
 // src/streams/StreamManager.js
 import { streamRedis, cacheTTL } from '../config.js';
+import { metrics } from './MetricsCollector.js';
 
 export class StreamManager {
   constructor() {
@@ -48,12 +49,27 @@ export class StreamManager {
 
       setImmediate(() => pipeline.exec()); // Fire and forget
 
+      // Record metrics for each entity type
+      const entityTypeCounts = {};
+      streamUpdates.forEach(({ streamId }) => {
+        const parts = streamId.split(':');
+        if (parts.length >= 2) {
+          const entityType = parts[1];
+          entityTypeCounts[entityType] = (entityTypeCounts[entityType] || 0) + 1;
+        }
+      });
+
+      Object.entries(entityTypeCounts).forEach(([entityType, count]) => {
+        metrics.recordStreamPush(entityType, count);
+      });
+
       return streamUpdates.map(() => ({ success: true }));
     } catch (error) {
       console.error('Batch stream add to multiple streams failed:', error);
-      return streamUpdates.map(() => ({ 
-        success: false, 
-        error: error.message 
+      metrics.recordStreamError();
+      return streamUpdates.map(() => ({
+        success: false,
+        error: error.message
       }));
     }
   }
@@ -87,12 +103,18 @@ export class StreamManager {
 
       setImmediate(() => pipeline.exec()); // Fire and forget
 
+      // Record metrics
+      streamCommands.forEach(cmd => {
+        metrics.recordStreamPush(cmd.entityType, 1);
+      });
+
       return streamCommands.map(() => ({ success: true }));
     } catch (error) {
       console.error('Batch stream add failed:', error);
-      return streamCommands.map(() => ({ 
-        success: false, 
-        error: error.message 
+      metrics.recordStreamError();
+      return streamCommands.map(() => ({
+        success: false,
+        error: error.message
       }));
     }
   }
@@ -155,11 +177,20 @@ export class StreamManager {
 
       const results = xrangeResults;
 
+      // Record metrics
+      pullCommands.forEach((cmd, index) => {
+        const [error, messages] = results[index];
+        if (!error && messages) {
+          metrics.recordStreamPull(cmd.entityType, messages.length);
+        }
+      });
+
       return pullCommands.map((cmd, index) => {
         const [error, messages] = results[index];
         const associatedWorldInstance = associatedWorldInstances[index];
-        
+
         if (error) {
+          metrics.recordStreamError();
           return {
             success: false,
             error: error.message,
@@ -180,6 +211,7 @@ export class StreamManager {
       });
     } catch (error) {
       console.error('Batch stream pull failed:', error);
+      metrics.recordStreamError();
       return pullCommands.map((cmd) => ({
         success: false,
         error: error.message,
