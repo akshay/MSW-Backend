@@ -54,6 +54,7 @@ DECLARE
   is_create BOOLEAN;
   is_delete BOOLEAN;
   existing_is_deleted BOOLEAN;
+  new_version INT;
 BEGIN
   FOR entity_record IN SELECT jsonb_array_elements(entity_data)
   LOOP
@@ -112,13 +113,15 @@ BEGIN
           version = version + 1,
           updated_at = NOW()
       WHERE entity_type = entity_record->>'entity_type'
-        AND id = entity_record->>'id';
+        AND id = entity_record->>'id'
+      RETURNING version INTO existing_entity.version;
 
       operation_result := jsonb_build_object(
         'success', true,
         'entity_type', entity_record->>'entity_type',
         'id', entity_record->>'id',
-        'operation', 'delete'
+        'operation', 'delete',
+        'version', existing_entity.version
       );
       result_array := result_array || operation_result;
       CONTINUE;
@@ -189,13 +192,15 @@ BEGIN
       rank_scores = merged_rank_scores,
       version = entities.version + 1,
       is_deleted = false,
-      updated_at = NOW();
+      updated_at = NOW()
+    RETURNING version INTO new_version;
 
     operation_result := jsonb_build_object(
       'success', true,
       'entity_type', entity_record->>'entity_type',
       'id', entity_record->>'id',
-      'operation', CASE WHEN is_create THEN 'create' ELSE 'update' END
+      'operation', CASE WHEN is_create THEN 'create' ELSE 'update' END,
+      'version', new_version
     );
     result_array := result_array || operation_result;
   END LOOP;

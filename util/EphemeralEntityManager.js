@@ -21,8 +21,44 @@ export class EphemeralEntityManager {
   }
 
   // Ephemeral key includes entityType and worldId
-  getEphemeralKey(entityType, entityId, worldId) {
+  // If version is provided, include it in the cache key
+  getEphemeralKey(entityType, entityId, worldId, version = null) {
+    if (version !== null) {
+      return `ephemeral:${entityType}:${worldId}:${entityId}:v${version}`;
+    }
     return `ephemeral:${entityType}:${worldId}:${entityId}`;
+  }
+
+  // Compute the difference between two entity versions
+  // Returns only the attributes that changed
+  computeEntityDiff(oldEntity, newEntity) {
+    if (!oldEntity) {
+      return newEntity;
+    }
+
+    const diff = {
+      ...newEntity,
+      attributes: {}
+    };
+
+    // Compare attributes
+    const oldAttrs = oldEntity.attributes || {};
+    const newAttrs = newEntity.attributes || {};
+
+    for (const [key, value] of Object.entries(newAttrs)) {
+      if (JSON.stringify(oldAttrs[key]) !== JSON.stringify(value)) {
+        diff.attributes[key] = value;
+      }
+    }
+
+    // Check for deleted attributes
+    for (const key of Object.keys(oldAttrs)) {
+      if (!(key in newAttrs)) {
+        diff.attributes[key] = InputValidator.NULL_MARKER;
+      }
+    }
+
+    return diff;
   }
 
   async batchSavePartial(updates) {
@@ -30,9 +66,9 @@ export class EphemeralEntityManager {
 
     try {
       const timestamp = Date.now();
-      
+
       // Check which entities exist (batch operation)
-      const keys = updates.map(({ entityType, entityId, worldId }) => 
+      const keys = updates.map(({ entityType, entityId, worldId }) =>
         this.getEphemeralKey(entityType, entityId, worldId)
       );
 
@@ -52,11 +88,13 @@ export class EphemeralEntityManager {
         const batchExists = existsFlags.slice(i, i + batchSize);
 
         const pipeline = this.redis.pipeline();
+        const versionKeyIndices = []; // Track which pipeline commands are version increments
 
         batch.forEach((update, batchIndex) => {
           const { entityType, entityId, worldId, attributes } = update;
           const key = batchKeys[batchIndex];
           const exists = batchExists[batchIndex];
+          const versionKey = `${key}:version`;
 
           // Separate attributes into updates and removals
           const attributesToSet = {};
@@ -88,10 +126,14 @@ export class EphemeralEntityManager {
               worldId,
               attributes: attributesToSet,
               lastWrite: timestamp,
+              version: 1,
               type: 'ephemeral'
             };
 
             pipeline.call('JSON.SET', key, '$', JSON.stringify(newEntity));
+            // Set initial version counter
+            versionKeyIndices.push({ index: pipeline.length, batchIndex });
+            pipeline.set(versionKey, '1');
           } else {
             // Update existing entity attributes atomically
 
@@ -108,11 +150,45 @@ export class EphemeralEntityManager {
             // Update worldId and timestamp
             pipeline.call('JSON.SET', key, '$.worldId', worldId);
             pipeline.call('JSON.SET', key, '$.lastWrite', timestamp);
+
+            // Atomically increment version
+            versionKeyIndices.push({ index: pipeline.length, batchIndex });
+            pipeline.incr(versionKey);
+
+            // Update version in JSON
+            pipeline.call('JSON.SET', key, '$.version', '__VERSION_PLACEHOLDER__');
           }
         });
 
-        setImmediate(() => pipeline.exec()); // Fire and forget
-        results.push(...batch.map(() => ({ success: true })));
+        // Execute pipeline and get version numbers
+        const pipelineResults = await pipeline.exec();
+
+        // Extract version numbers from results and cache versioned entities
+        const cachePipeline = this.redis.pipeline();
+
+        versionKeyIndices.forEach(({ index, batchIndex }) => {
+          const [error, version] = pipelineResults[index];
+          if (!error && version) {
+            const versionNum = parseInt(version);
+            const update = batch[batchIndex];
+            const { entityType, entityId, worldId } = update;
+            const key = batchKeys[batchIndex];
+
+            // Update the version in the entity JSON
+            cachePipeline.call('JSON.SET', key, '$.version', versionNum);
+
+            // Cache this version of the entity for future diff calculations
+            const versionedKey = this.getEphemeralKey(entityType, entityId, worldId, versionNum);
+            cachePipeline.call('JSON.COPY', key, versionedKey);
+
+            results[i + batchIndex] = { version: versionNum, success: true };
+          } else {
+            results[i + batchIndex] = { version: 1, success: true };
+          }
+        });
+
+        // Execute cache pipeline (fire and forget)
+        setImmediate(() => cachePipeline.exec());
       }
 
       // Batch add to streams (fire-and-forget for performance)
@@ -139,14 +215,36 @@ export class EphemeralEntityManager {
     if (requests.length === 0) return [];
 
     try {
-      const keys = requests.map(({ entityType, entityId, worldId }) =>
-        this.getEphemeralKey(entityType, entityId, worldId)
-      );
+      // Prepare keys for both newest and versioned entities
+      const newestKeys = [];
+      const versionedKeys = [];
+      const requestMeta = [];
 
-      // Create pipeline for JSON.GET operations
+      requests.forEach((request) => {
+        const { entityType, entityId, worldId, version = 0 } = request;
+        const newestKey = this.getEphemeralKey(entityType, entityId, worldId);
+        const versionedKey = version > 0 ? this.getEphemeralKey(entityType, entityId, worldId, version) : null;
+
+        newestKeys.push(newestKey);
+        versionedKeys.push(versionedKey);
+        requestMeta.push({
+          newestKey,
+          versionedKey,
+          hasVersion: version > 0
+        });
+      });
+
+      // Create pipeline for JSON.GET operations for newest entities
       const entityPipeline = this.redis.pipeline();
-      keys.forEach(key => {
+      newestKeys.forEach(key => {
         entityPipeline.call('JSON.GET', key);
+      });
+
+      // Also get versioned entities if requested
+      versionedKeys.forEach(key => {
+        if (key) {
+          entityPipeline.call('JSON.GET', key);
+        }
       });
 
       // Get world instance association keys for MGET
@@ -156,23 +254,48 @@ export class EphemeralEntityManager {
       });
 
       // Execute entity pipeline and MGET in parallel
-      const [entityResults, worldInstanceIds] = await Promise.all([
+      const [pipelineResults, worldInstanceIds] = await Promise.all([
         entityPipeline.exec(),
         this.streamManager.redis.mget(worldInstanceKeys)
       ]);
 
-      return requests.map((request, index) => {
-        const [error, result] = entityResults[index];
-        const worldInstanceId = worldInstanceIds[index];
+      // Parse results
+      const newestEntities = pipelineResults.slice(0, requests.length);
+      let versionedEntityIndex = requests.length;
 
-        if (error || !result) {
+      return requests.map((request, index) => {
+        const [newestError, newestResult] = newestEntities[index];
+        const worldInstanceId = worldInstanceIds[index];
+        const meta = requestMeta[index];
+
+        if (newestError || !newestResult) {
           return null;
         }
 
-        const entity = JSON.parse(result);
+        const newestEntity = JSON.parse(newestResult);
+
         // Add worldInstanceId to the entity (empty string if no association exists)
-        entity.worldInstanceId = worldInstanceId || '';
-        return entity;
+        newestEntity.worldInstanceId = worldInstanceId || '';
+
+        // If no version was requested, return the newest entity
+        if (!meta.hasVersion) {
+          return newestEntity;
+        }
+
+        // Get the versioned entity if it was requested
+        const [versionedError, versionedResult] = pipelineResults[versionedEntityIndex++];
+
+        if (versionedError || !versionedResult) {
+          // Version not found in cache, return full newest entity
+          return newestEntity;
+        }
+
+        const versionedEntity = JSON.parse(versionedResult);
+
+        // Compute and return the diff
+        const diff = this.computeEntityDiff(versionedEntity, newestEntity);
+        diff.worldInstanceId = worldInstanceId || '';
+        return diff;
       });
 
     } catch (error) {

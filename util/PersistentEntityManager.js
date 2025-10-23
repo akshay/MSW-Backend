@@ -231,8 +231,9 @@ export class PersistentEntityManager {
 
     // Group updates by entity (merge multiple updates for same entity)
     const mergedUpdates = new Map();
+    const updateKeyMap = new Map(); // Track which merged update each original update maps to
 
-    updates.forEach(({ entityType, entityId, worldId, attributes, rankScores, isCreate, isDelete }) => {
+    updates.forEach(({ entityType, entityId, worldId, attributes, rankScores, isCreate, isDelete }, index) => {
       const key = `${entityType}:${entityId}:${worldId}`;
       const existing = mergedUpdates.get(key) || {
         entityType,
@@ -252,31 +253,33 @@ export class PersistentEntityManager {
         isCreate: existing.isCreate || isCreate || false,
         isDelete: existing.isDelete || isDelete || false
       });
+
+      // Track which updates map to which merged entity
+      updateKeyMap.set(index, key);
     });
 
-    // Execute as fire-and-forget for eventual consistency
-    setImmediate(async () => {
-      try {
-        await this.performBatchUpsert(mergedUpdates);
-      } catch (error) {
-        console.error('Batch save error:', error);
-      }
-    });
+    // Perform batch upsert and get results with version numbers
+    const operationResults = await this.performBatchUpsert(mergedUpdates);
 
-    // Return immediate success responses
-    return updates.map(() => ({ success: true }));
+    // Map results back to original update order
+    return updates.map((_, index) => {
+      const key = updateKeyMap.get(index);
+      const result = operationResults.get(key);
+      return result || { success: false, error: 'Operation failed' };
+    });
   }
 
   async performBatchUpsert(mergedUpdates) {
     const batchSize = 5000; // Increased batch size for better throughput
-    const updateEntries = Array.from(mergedUpdates.values());
+    const updateEntries = Array.from(mergedUpdates.entries());
     const streamUpdates = []; // Collect stream updates
+    const resultMap = new Map(); // Map to store results by entity key
 
     for (let i = 0; i < updateEntries.length; i += batchSize) {
       const batch = updateEntries.slice(i, i + batchSize);
 
       // Prepare batch data for the function with input validation
-      const batchData = batch.map(({ entityType, entityId, worldId, attributes, rankScores, isCreate, isDelete }) => {
+      const batchData = batch.map(([, { entityType, entityId, worldId, attributes, rankScores, isCreate, isDelete }]) => {
         const entityData = {
           entity_type: entityType,
           id: entityId,
@@ -339,28 +342,49 @@ export class PersistentEntityManager {
         SELECT batch_upsert_entities_partial(${batchDataJson}::JSONB) as result
       `;
 
-      // Log any errors from the batch operation
+      // Process results and store them by entity key
       if (result && result[0] && result[0].result) {
         const operationResult = result[0].result;
-        const failedOps = operationResult.results?.filter(r => !r.success) || [];
+        const results = operationResult.results || [];
+
+        results.forEach((opResult, index) => {
+          const [entityKey] = batch[index];
+          if (opResult.success) {
+            resultMap.set(entityKey, {
+              success: true,
+              version: opResult.version
+            });
+          } else {
+            resultMap.set(entityKey, {
+              success: false,
+              error: opResult.error
+            });
+          }
+        });
+
+        // Log any errors from the batch operation
+        const failedOps = results.filter(r => !r.success);
         if (failedOps.length > 0) {
           console.warn('Some batch operations failed:', failedOps);
         }
       }
 
       // Batch invalidate cache for this batch
-      const cacheInvalidations = batch.map(({ entityType, entityId }) => `${entityType}:${entityId}`);
+      const cacheInvalidations = batch.map(([_, { entityType, entityId }]) => `${entityType}:${entityId}`);
       await this.cache.invalidateEntities(cacheInvalidations);
     }
 
     // Batch add to streams (fire-and-forget for performance)
-    try {
-      await this.streamManager.batchAddToStreams(streamUpdates);
-    } catch (error) {
-      console.warn('Stream updates failed for persistent entities:', error);
-    }
+    setImmediate(async () => {
+      try {
+        await this.streamManager.batchAddToStreams(streamUpdates);
+      } catch (error) {
+        console.warn('Stream updates failed for persistent entities:', error);
+      }
+    });
 
     console.log(`Atomic batch upsert completed: ${mergedUpdates.size} entities`);
+    return resultMap;
   }
 
   // Batch get ranked entities with batched cache operations

@@ -378,11 +378,18 @@ describe('PersistentEntityManager', () => {
         { entityType: 'character', entityId: 'user1', worldId: 1, attributes: { exp: 100 } }
       ];
 
+      mockPrisma.$queryRaw.mockResolvedValue([{
+        result: {
+          results: [{ success: true, entity_type: 'character', id: 'user1', operation: 'update', version: 5 }],
+          total: 1
+        }
+      }]);
+
       const result = await manager.batchSavePartial(updates);
 
       expect(result).toEqual([
-        { success: true },
-        { success: true }
+        { success: true, version: 5 },
+        { success: true, version: 5 }
       ]);
     });
 
@@ -391,14 +398,15 @@ describe('PersistentEntityManager', () => {
         { entityType: 'character', entityId: 'user1', worldId: 1, attributes: { level: 10 } }
       ];
 
-      const performBatchUpsertSpy = jest.spyOn(manager, 'performBatchUpsert').mockResolvedValue();
+      const mockResultMap = new Map([
+        ['character:user1:1', { success: true, version: 3 }]
+      ]);
+      const performBatchUpsertSpy = jest.spyOn(manager, 'performBatchUpsert').mockResolvedValue(mockResultMap);
 
-      await manager.batchSavePartial(updates);
-
-      // Wait for setImmediate to execute
-      await new Promise(resolve => process.nextTick(resolve));
+      const result = await manager.batchSavePartial(updates);
 
       expect(performBatchUpsertSpy).toHaveBeenCalledWith(expect.any(Map));
+      expect(result).toEqual([{ success: true, version: 3 }]);
     });
   });
 
@@ -422,14 +430,20 @@ describe('PersistentEntityManager', () => {
         }]
       ]);
 
-      mockPrisma.$queryRaw.mockResolvedValue(undefined);
+      mockPrisma.$queryRaw.mockResolvedValue([{
+        result: {
+          results: [{ success: true, entity_type: 'character', id: 'user1', operation: 'update', version: 7 }],
+          total: 1
+        }
+      }]);
       mockCache.invalidateEntities.mockResolvedValue();
       mockStreamManager.batchAddToStreams.mockResolvedValue();
 
-      await manager.performBatchUpsert(mergedUpdates);
+      const result = await manager.performBatchUpsert(mergedUpdates);
 
       expect(mockPrisma.$queryRaw).toHaveBeenCalled();
       expect(mockCache.invalidateEntities).toHaveBeenCalledWith(['character:user1']);
+      expect(result.get('character:user1:1')).toEqual({ success: true, version: 7 });
     });
   });
 
