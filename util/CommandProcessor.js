@@ -118,7 +118,8 @@ export class CommandProcessor {
         this.processBatchedStreamPulls(commands.recv || []),
         this.processBatchedSearchByName(commands.search || []),
         this.processBatchedCalculateRank(commands.rank || []),
-        this.processBatchedGetRankings(commands.top || [])
+        this.processBatchedGetRankings(commands.top || []),
+        this.processBatchedClientMetrics(commands.emit || [])
       ]);
 
       // Reconstruct results in original command order
@@ -135,7 +136,8 @@ export class CommandProcessor {
         recv: commands.recv?.length || 0,
         search: commands.search?.length || 0,
         rank: commands.rank?.length || 0,
-        top: commands.top?.length || 0
+        top: commands.top?.length || 0,
+        emit: commands.emit?.length || 0
       };
 
       Object.entries(commandCounts).forEach(([type, count]) => {
@@ -275,13 +277,15 @@ export class CommandProcessor {
         command.type = cmd;
         command.worldInstanceId = worldInstanceId;
 
-        // Validate required fields
-        if (!command.entityType) {
-          throw new Error(`Command ${i}: entityType is required`);
-        }
+        // Validate required fields (skip for emit commands which have different structure)
+        if (cmd !== 'emit') {
+          if (!command.entityType) {
+            throw new Error(`Command ${i}: entityType is required`);
+          }
 
-        if (command.worldId === undefined || command.worldId === null) {
-          throw new Error(`Command ${i}: worldId is required`);
+          if (command.worldId === undefined || command.worldId === null) {
+            throw new Error(`Command ${i}: worldId is required`);
+          }
         }
       }
     }
@@ -529,6 +533,54 @@ export class CommandProcessor {
       returnMap[cmd] = originalCommands[cmd].map((_, index) => resultMap[cmd].get(index));
     }
     return returnMap;
+  }
+
+  async processBatchedClientMetrics(clientMetricsCommands) {
+    if (clientMetricsCommands.length === 0) return [];
+
+    const results = [];
+
+    for (const cmd of clientMetricsCommands) {
+      try {
+        // Validate metrics array structure
+        if (!Array.isArray(cmd.metrics)) {
+          throw new Error('metrics must be an array');
+        }
+
+        // Process each metric in the command
+        for (const metric of cmd.metrics) {
+          // Validate metric structure
+          if (!metric.group || typeof metric.group !== 'string') {
+            throw new Error('Each metric must have a "group" (string)');
+          }
+          if (typeof metric.value !== 'number') {
+            throw new Error('Each metric must have a "value" (number)');
+          }
+
+          // Record the client metric
+          metrics.recordClientMetric(
+            metric.group,
+            metric.value,
+            metric.tags || {},
+            cmd.worldInstanceId
+          );
+        }
+
+        results.push({
+          originalIndex: cmd.originalIndex,
+          type: 'emit',
+          result: { success: true, count: cmd.metrics.length }
+        });
+      } catch (error) {
+        results.push({
+          originalIndex: cmd.originalIndex,
+          type: 'emit',
+          result: { success: false, error: error.message }
+        });
+      }
+    }
+
+    return results;
   }
 
   isEphemeralEntityType(entityType) {

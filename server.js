@@ -334,6 +334,61 @@ function generateDashboardHTML() {
       </div>
     </div>
 
+    ${summary.clientMetrics.groups.length > 0 ? `
+    <div class="section">
+      <h3 class="section-title">Client-Submitted Metrics</h3>
+      <div class="grid">
+        <div class="card">
+          <h2>Total Client Metrics</h2>
+          <div class="value">${summary.clientMetrics.total.toLocaleString()}</div>
+          <div class="label">All time</div>
+        </div>
+        <div class="card">
+          <h2>Metric Groups</h2>
+          <div class="value">${summary.clientMetrics.groups.length}</div>
+          <div class="label">Unique groups</div>
+        </div>
+      </div>
+      <table style="margin-top: 20px;">
+        <thead>
+          <tr>
+            <th>Group</th>
+            <th>Count</th>
+            <th>Mean</th>
+            <th>Median</th>
+            <th>Sum</th>
+            <th>Min</th>
+            <th>Max</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${summary.clientMetrics.groups.map(metric => `
+            <tr>
+              <td><strong>${metric.group}</strong></td>
+              <td>${metric.count.toLocaleString()}</td>
+              <td>${metric.mean}</td>
+              <td>${metric.median}</td>
+              <td>${metric.sum}</td>
+              <td>${metric.min}</td>
+              <td>${metric.max}</td>
+            </tr>
+            ${metric.tagBreakdown.length > 0 ? metric.tagBreakdown.map(tag => `
+              <tr style="background: #0f172a;">
+                <td style="padding-left: 30px; color: #94a3b8;">${JSON.stringify(tag.tags)}</td>
+                <td style="color: #94a3b8;">${tag.count.toLocaleString()}</td>
+                <td style="color: #94a3b8;">${tag.mean}</td>
+                <td style="color: #94a3b8;">${tag.median}</td>
+                <td style="color: #94a3b8;">${tag.sum}</td>
+                <td style="color: #94a3b8;">${tag.min}</td>
+                <td style="color: #94a3b8;">${tag.max}</td>
+              </tr>
+            `).join('') : ''}
+          `).join('')}
+        </tbody>
+      </table>
+    </div>
+    ` : ''}
+
     <div class="section">
       <p class="subtitle">
         <a href="/metrics" style="color: #38bdf8;">JSON API</a> |

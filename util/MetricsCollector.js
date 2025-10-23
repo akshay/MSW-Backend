@@ -79,6 +79,12 @@ export class MetricsCollector {
         uptime: 0,
         memoryUsage: {},
         cpuUsage: {}
+      },
+
+      // Client-submitted metrics
+      clientMetrics: {
+        byGroup: {},
+        total: 0
       }
     };
 
@@ -276,6 +282,115 @@ export class MetricsCollector {
     }
   }
 
+  // Client metrics
+  recordClientMetric(group, value, tags = {}, worldInstanceId = null) {
+    this.metrics.clientMetrics.total++;
+
+    if (!this.metrics.clientMetrics.byGroup[group]) {
+      this.metrics.clientMetrics.byGroup[group] = {
+        count: 0,
+        sum: 0,
+        min: value,
+        max: value,
+        mean: 0,
+        median: 0,
+        values: [], // Store values for median calculation
+        byTags: {},
+        byWorldInstance: {}
+      };
+    }
+
+    const groupMetrics = this.metrics.clientMetrics.byGroup[group];
+    groupMetrics.count++;
+    groupMetrics.sum += value;
+    groupMetrics.min = Math.min(groupMetrics.min, value);
+    groupMetrics.max = Math.max(groupMetrics.max, value);
+    groupMetrics.mean = groupMetrics.sum / groupMetrics.count;
+
+    // Store value for median calculation (keep last 1000 values for memory efficiency)
+    groupMetrics.values.push(value);
+    if (groupMetrics.values.length > 1000) {
+      groupMetrics.values.shift();
+    }
+
+    // Calculate median
+    groupMetrics.median = this.calculateMedian(groupMetrics.values);
+
+    // Track by tags if provided
+    if (tags && Object.keys(tags).length > 0) {
+      const tagKey = JSON.stringify(tags);
+      if (!groupMetrics.byTags[tagKey]) {
+        groupMetrics.byTags[tagKey] = {
+          tags,
+          count: 0,
+          sum: 0,
+          min: value,
+          max: value,
+          mean: 0,
+          median: 0,
+          values: []
+        };
+      }
+      const tagMetrics = groupMetrics.byTags[tagKey];
+      tagMetrics.count++;
+      tagMetrics.sum += value;
+      tagMetrics.min = Math.min(tagMetrics.min, value);
+      tagMetrics.max = Math.max(tagMetrics.max, value);
+      tagMetrics.mean = tagMetrics.sum / tagMetrics.count;
+
+      // Store value for median calculation
+      tagMetrics.values.push(value);
+      if (tagMetrics.values.length > 1000) {
+        tagMetrics.values.shift();
+      }
+      tagMetrics.median = this.calculateMedian(tagMetrics.values);
+    }
+
+    // Track by world instance
+    if (worldInstanceId) {
+      if (!groupMetrics.byWorldInstance[worldInstanceId]) {
+        groupMetrics.byWorldInstance[worldInstanceId] = {
+          count: 0,
+          sum: 0,
+          min: value,
+          max: value,
+          mean: 0,
+          median: 0,
+          values: []
+        };
+      }
+      const instanceMetrics = groupMetrics.byWorldInstance[worldInstanceId];
+      instanceMetrics.count++;
+      instanceMetrics.sum += value;
+      instanceMetrics.min = Math.min(instanceMetrics.min, value);
+      instanceMetrics.max = Math.max(instanceMetrics.max, value);
+      instanceMetrics.mean = instanceMetrics.sum / instanceMetrics.count;
+
+      // Store value for median calculation
+      instanceMetrics.values.push(value);
+      if (instanceMetrics.values.length > 1000) {
+        instanceMetrics.values.shift();
+      }
+      instanceMetrics.median = this.calculateMedian(instanceMetrics.values);
+    }
+  }
+
+  // Calculate median from array of values
+  calculateMedian(values) {
+    if (values.length === 0) return 0;
+
+    const sorted = [...values].sort((a, b) => a - b);
+    const mid = Math.floor(sorted.length / 2);
+
+    if (sorted.length % 2 === 0) {
+      // Even number of values - return average of two middle values
+      return (sorted[mid - 1] + sorted[mid]) / 2;
+    } else {
+      // Odd number of values - return middle value
+      return sorted[mid];
+    }
+  }
+
   percentile(sortedArray, percentile) {
     const index = Math.ceil((percentile / 100) * sortedArray.length) - 1;
     return sortedArray[index];
@@ -452,6 +567,27 @@ export class MetricsCollector {
         p50: Math.round(this.metrics.performance.p50),
         p95: Math.round(this.metrics.performance.p95),
         p99: Math.round(this.metrics.performance.p99)
+      },
+      clientMetrics: {
+        total: this.metrics.clientMetrics.total,
+        groups: Object.entries(this.metrics.clientMetrics.byGroup).map(([group, data]) => ({
+          group,
+          count: data.count,
+          sum: data.sum.toFixed(2),
+          min: data.min.toFixed(2),
+          max: data.max.toFixed(2),
+          mean: data.mean.toFixed(2),
+          median: data.median.toFixed(2),
+          tagBreakdown: Object.entries(data.byTags).map(([tagKey, tagData]) => ({
+            tags: tagData.tags,
+            count: tagData.count,
+            sum: tagData.sum.toFixed(2),
+            min: tagData.min.toFixed(2),
+            max: tagData.max.toFixed(2),
+            mean: tagData.mean.toFixed(2),
+            median: tagData.median.toFixed(2)
+          }))
+        }))
       }
     };
   }
@@ -535,6 +671,39 @@ export class MetricsCollector {
       `msw_request_duration_ms{quantile="0.99"} ${this.metrics.performance.p99}`
     );
 
+    // Client metrics
+    lines.push('# HELP msw_client_metrics_total Total client metrics submitted');
+    lines.push('# TYPE msw_client_metrics_total counter');
+    lines.push(`msw_client_metrics_total ${this.metrics.clientMetrics.total}`);
+
+    Object.entries(this.metrics.clientMetrics.byGroup).forEach(([group, data]) => {
+      const sanitizedGroup = group.replace(/[^a-zA-Z0-9_]/g, '_');
+
+      lines.push(`# HELP msw_client_metric_${sanitizedGroup}_count Count of ${group} metrics`);
+      lines.push(`# TYPE msw_client_metric_${sanitizedGroup}_count gauge`);
+      lines.push(`msw_client_metric_${sanitizedGroup}_count ${data.count}`);
+
+      lines.push(`# HELP msw_client_metric_${sanitizedGroup}_mean Mean of ${group} metrics`);
+      lines.push(`# TYPE msw_client_metric_${sanitizedGroup}_mean gauge`);
+      lines.push(`msw_client_metric_${sanitizedGroup}_mean ${data.mean}`);
+
+      lines.push(`# HELP msw_client_metric_${sanitizedGroup}_median Median of ${group} metrics`);
+      lines.push(`# TYPE msw_client_metric_${sanitizedGroup}_median gauge`);
+      lines.push(`msw_client_metric_${sanitizedGroup}_median ${data.median}`);
+
+      lines.push(`# HELP msw_client_metric_${sanitizedGroup}_sum Sum of ${group} metrics`);
+      lines.push(`# TYPE msw_client_metric_${sanitizedGroup}_sum counter`);
+      lines.push(`msw_client_metric_${sanitizedGroup}_sum ${data.sum}`);
+
+      lines.push(`# HELP msw_client_metric_${sanitizedGroup}_min Minimum of ${group} metrics`);
+      lines.push(`# TYPE msw_client_metric_${sanitizedGroup}_min gauge`);
+      lines.push(`msw_client_metric_${sanitizedGroup}_min ${data.min}`);
+
+      lines.push(`# HELP msw_client_metric_${sanitizedGroup}_max Maximum of ${group} metrics`);
+      lines.push(`# TYPE msw_client_metric_${sanitizedGroup}_max gauge`);
+      lines.push(`msw_client_metric_${sanitizedGroup}_max ${data.max}`);
+    });
+
     return lines.join('\n');
   }
 
@@ -569,6 +738,10 @@ export class MetricsCollector {
         uptime: 0,
         memoryUsage: {},
         cpuUsage: {}
+      },
+      clientMetrics: {
+        byGroup: {},
+        total: 0
       }
     };
   }

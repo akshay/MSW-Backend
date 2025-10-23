@@ -753,6 +753,7 @@ describe('CommandProcessor', () => {
       jest.spyOn(commandProcessor, 'processBatchedSearchByName').mockResolvedValue([]);
       jest.spyOn(commandProcessor, 'processBatchedCalculateRank').mockResolvedValue([]);
       jest.spyOn(commandProcessor, 'processBatchedGetRankings').mockResolvedValue([]);
+      jest.spyOn(commandProcessor, 'processBatchedClientMetrics').mockResolvedValue([]);
     });
 
     test('should process valid command payload', async () => {
@@ -803,6 +804,130 @@ describe('CommandProcessor', () => {
       commandProcessor.validateAndDecryptRequest.mockRejectedValueOnce(new Error('Validation failed'));
 
       await expect(commandProcessor.processCommands(payload)).rejects.toThrow('Validation failed');
+    });
+  });
+
+  describe('processBatchedClientMetrics', () => {
+    test('should process valid client metrics', async () => {
+      const commands = [{
+        originalIndex: 0,
+        type: 'emit',
+        worldInstanceId: 'world123',
+        metrics: [
+          { group: 'fps', value: 60.5, tags: { platform: 'windows' } },
+          { group: 'latency', value: 25.3 }
+        ]
+      }];
+
+      const results = await commandProcessor.processBatchedClientMetrics(commands);
+
+      expect(results).toHaveLength(1);
+      expect(results[0]).toEqual({
+        originalIndex: 0,
+        type: 'emit',
+        result: { success: true, count: 2 }
+      });
+    });
+
+    test('should handle metrics without tags', async () => {
+      const commands = [{
+        originalIndex: 0,
+        type: 'emit',
+        worldInstanceId: 'world123',
+        metrics: [
+          { group: 'score', value: 1000 }
+        ]
+      }];
+
+      const results = await commandProcessor.processBatchedClientMetrics(commands);
+
+      expect(results).toHaveLength(1);
+      expect(results[0].result.success).toBe(true);
+      expect(results[0].result.count).toBe(1);
+    });
+
+    test('should return error for invalid metrics structure', async () => {
+      const commands = [{
+        originalIndex: 0,
+        type: 'emit',
+        worldInstanceId: 'world123',
+        metrics: 'not an array'
+      }];
+
+      const results = await commandProcessor.processBatchedClientMetrics(commands);
+
+      expect(results).toHaveLength(1);
+      expect(results[0].result.success).toBe(false);
+      expect(results[0].result.error).toBe('metrics must be an array');
+    });
+
+    test('should return error for missing group', async () => {
+      const commands = [{
+        originalIndex: 0,
+        type: 'emit',
+        worldInstanceId: 'world123',
+        metrics: [
+          { value: 100 }
+        ]
+      }];
+
+      const results = await commandProcessor.processBatchedClientMetrics(commands);
+
+      expect(results).toHaveLength(1);
+      expect(results[0].result.success).toBe(false);
+      expect(results[0].result.error).toContain('group');
+    });
+
+    test('should return error for invalid value type', async () => {
+      const commands = [{
+        originalIndex: 0,
+        type: 'emit',
+        worldInstanceId: 'world123',
+        metrics: [
+          { group: 'test', value: 'not a number' }
+        ]
+      }];
+
+      const results = await commandProcessor.processBatchedClientMetrics(commands);
+
+      expect(results).toHaveLength(1);
+      expect(results[0].result.success).toBe(false);
+      expect(results[0].result.error).toContain('value');
+    });
+
+    test('should return empty array for empty commands', async () => {
+      const results = await commandProcessor.processBatchedClientMetrics([]);
+      expect(results).toEqual([]);
+    });
+
+    test('should process multiple metric commands', async () => {
+      const commands = [
+        {
+          originalIndex: 0,
+          type: 'emit',
+          worldInstanceId: 'world123',
+          metrics: [
+            { group: 'fps', value: 60 }
+          ]
+        },
+        {
+          originalIndex: 1,
+          type: 'emit',
+          worldInstanceId: 'world456',
+          metrics: [
+            { group: 'latency', value: 30 },
+            { group: 'bandwidth', value: 1000 }
+          ]
+        }
+      ];
+
+      const results = await commandProcessor.processBatchedClientMetrics(commands);
+
+      expect(results).toHaveLength(2);
+      expect(results[0].result.success).toBe(true);
+      expect(results[0].result.count).toBe(1);
+      expect(results[1].result.success).toBe(true);
+      expect(results[1].result.count).toBe(2);
     });
   });
 });
