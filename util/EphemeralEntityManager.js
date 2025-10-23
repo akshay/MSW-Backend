@@ -100,15 +100,58 @@ export class EphemeralEntityManager {
         const dirtyKeys = []; // Track keys to add to dirty set
 
         batch.forEach((update, batchIndex) => {
-          const { entityType, entityId, worldId, attributes } = update;
+          const { entityType, entityId, worldId, attributes, isCreate = false, isDelete = false } = update;
           const key = batchKeys[batchIndex];
           const exists = batchExists[batchIndex];
           const versionKey = `${key}:version`;
+
+          // Validation: Reject updates based on existence and flags
+          if (!exists && !isCreate) {
+            // Entity doesn't exist and isCreate is false - reject
+            results[i + batchIndex] = {
+              success: false,
+              error: 'Entity does not exist and isCreate is false'
+            };
+            return;
+          }
+
+          if (!exists && isDelete) {
+            // Entity doesn't exist and isDelete is true - reject
+            results[i + batchIndex] = {
+              success: false,
+              error: 'Entity does not exist and isDelete is true'
+            };
+            return;
+          }
+
+          if (exists && isCreate) {
+            // Entity exists and isCreate is true - reject
+            results[i + batchIndex] = {
+              success: false,
+              error: 'Entity already exists and isCreate is true'
+            };
+            return;
+          }
 
           // Track this entity as dirty for background persistence
           // Skip ephemeral-only entity types that should not be persisted to DB
           if (!this.isEphemeralOnly(entityType)) {
             dirtyKeys.push(`${entityType}:${worldId}:${entityId}`);
+          }
+
+          // Handle deletion
+          if (isDelete) {
+            // Delete the entity and its version counter
+            pipeline.call('JSON.DEL', key);
+            pipeline.del(versionKey);
+
+            // Add deletion to stream
+            streamUpdates.push({
+              streamId: key,
+              data: { deleted: true }
+            });
+
+            return; // Skip further processing for this entity
           }
 
           // Separate attributes into updates and removals
@@ -133,8 +176,8 @@ export class EphemeralEntityManager {
             data: streamData
           });
 
-          if (!exists) {
-            // Create new entity (ignore NULL_MARKER values - nothing to remove yet)
+          if (isCreate) {
+            // Create new entity (isCreate=true and entity doesn't exist, validated above)
             const newEntity = {
               id: entityId,
               entityType,
@@ -150,7 +193,7 @@ export class EphemeralEntityManager {
             versionKeyIndices.push({ index: pipeline.length, batchIndex });
             pipeline.set(versionKey, '1');
           } else {
-            // Update existing entity attributes atomically
+            // Update existing entity attributes atomically (entity exists, validated above)
 
             // Set new/updated attributes
             Object.entries(attributesToSet).forEach(([field, value]) => {
