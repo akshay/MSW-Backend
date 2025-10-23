@@ -1,5 +1,5 @@
 // util/BackgroundPersistenceTask.js
-import { ephemeralRedis } from '../config.js';
+import { ephemeralRedis, config } from '../config.js';
 import { DistributedLock } from './DistributedLock.js';
 import { metrics } from './MetricsCollector.js';
 
@@ -9,11 +9,13 @@ export class BackgroundPersistenceTask {
     this.persistentManager = persistentManager;
     this.lock = new DistributedLock(ephemeralRedis);
 
-    // Configuration
+    // Configuration with environment variable defaults
     this.lockKey = options.lockKey || 'background:persistence:lock';
-    this.lockTTL = options.lockTTL || 10; // 10 seconds
-    this.batchSize = options.batchSize || 500; // Process 500 entities per run
-    this.intervalMs = options.intervalMs || 5000; // Run every 5 seconds
+    this.lockTTL = options.lockTTL || config.backgroundPersistence.lockTTL;
+    this.batchSize = options.batchSize || config.backgroundPersistence.batchSize;
+    this.intervalMs = options.intervalMs || config.backgroundPersistence.intervalMs;
+    this.maxRetries = options.maxRetries || config.backgroundPersistence.maxRetries;
+    this.retryDelayMs = options.retryDelayMs || config.backgroundPersistence.retryDelayMs;
 
     // State
     this.intervalId = null;
@@ -23,6 +25,7 @@ export class BackgroundPersistenceTask {
       successfulRuns: 0,
       failedRuns: 0,
       entitiesPersisted: 0,
+      retriedOperations: 0,
       lastRunTime: null,
       lastError: null
     };
@@ -116,34 +119,118 @@ export class BackgroundPersistenceTask {
   }
 
   /**
-   * Process pending updates from ephemeral storage
+   * Process pending updates from ephemeral storage with retry logic
    * This is called while holding the distributed lock
    */
   async processPendingUpdates() {
     // Get pending updates from ephemeral storage
-    const pendingUpdates = await this.ephemeralManager.getPendingUpdates(this.batchSize);
+    const originalUpdates = await this.ephemeralManager.getPendingUpdates(this.batchSize);
 
-    if (pendingUpdates.length === 0) {
+    if (originalUpdates.length === 0) {
       return { processed: 0, remaining: 0 };
     }
 
-    // Persist to database using the direct persistence method
-    // We bypass the ephemeral manager here since we're doing the background sync
-    const results = await this.persistentManager.performBatchUpsert(
-      this.convertToMergedUpdates(pendingUpdates)
-    );
+    // Track all results across retries and remaining updates to retry
+    const allResults = new Map();
+    let pendingUpdates = originalUpdates;
+    let lastError = null;
+
+    for (let attempt = 1; attempt <= this.maxRetries; attempt++) {
+      try {
+        // Persist to database using the direct persistence method
+        const results = await this.persistentManager.performBatchUpsert(
+          this.convertToMergedUpdates(pendingUpdates)
+        );
+
+        // Merge results into allResults map, handling non-retryable errors
+        for (const [key, result] of results.entries()) {
+          // Convert non-retryable errors to success
+          if (!result.success && result.error === 'ENTITY_NOT_FOUND') {
+            console.log(`Entity not found during persistence (likely deleted): ${key} - marking as success`);
+            allResults.set(key, { success: true, version: 0, skipped: true });
+          } else {
+            allResults.set(key, result);
+          }
+        }
+
+        // Check if any operations failed (excluding non-retryable errors already converted to success)
+        const failed = Array.from(allResults.values()).filter(r => !r.success);
+
+        if (failed.length === 0) {
+          // All succeeded, break out of retry loop
+          break;
+        }
+
+        // Some operations failed - filter to retry only retryable failures
+        if (attempt < this.maxRetries) {
+          const retryableFailedKeys = Array.from(allResults.entries())
+            .filter(([, result]) => !result.success && result.error !== 'ENTITY_NOT_FOUND')
+            .map(([key]) => key);
+
+          // Filter pendingUpdates to only include retryable failed operations
+          pendingUpdates = pendingUpdates.filter(update => {
+            const key = `${update.entityType}:${update.entityId}:${update.worldId}`;
+            return retryableFailedKeys.includes(key);
+          });
+
+          if (pendingUpdates.length > 0) {
+            console.warn(
+              `Batch persistence partially failed (${failed.length} failures), ` +
+              `retrying ${pendingUpdates.length} retryable operations in ${this.retryDelayMs}ms ` +
+              `(attempt ${attempt}/${this.maxRetries})`
+            );
+            this.stats.retriedOperations += pendingUpdates.length;
+            await new Promise(resolve => setTimeout(resolve, this.retryDelayMs));
+          } else {
+            // No retryable failures left
+            break;
+          }
+        } else {
+          console.error(`Batch persistence failed after ${this.maxRetries} attempts for ${failed.length} entities:`, failed);
+        }
+
+      } catch (error) {
+        lastError = error;
+        if (attempt < this.maxRetries) {
+          console.warn(
+            `Batch persistence error, retrying ${pendingUpdates.length} operations in ${this.retryDelayMs}ms ` +
+            `(attempt ${attempt}/${this.maxRetries}):`, error
+          );
+          this.stats.retriedOperations += pendingUpdates.length;
+          await new Promise(resolve => setTimeout(resolve, this.retryDelayMs));
+        } else {
+          console.error(`Batch persistence failed after ${this.maxRetries} attempts:`, error);
+          throw error; // Re-throw on final attempt
+        }
+      }
+    }
+
+    if (allResults.size === 0) {
+      throw new Error(`Failed to persist batch after ${this.maxRetries} attempts: ${lastError}`);
+    }
 
     // Count successful persists
-    const successful = Array.from(results.values()).filter(r => r.success).length;
+    const successful = Array.from(allResults.values()).filter(r => r.success).length;
 
-    // Flush successfully persisted entities from ephemeral storage
-    const successfulKeys = pendingUpdates
-      .filter((update, index) => {
+    // Flush successfully persisted entities from ephemeral storage and remove from dirty set
+    // Use originalUpdates to get all attempted entities, not just the failed ones from retries
+    const successfulKeys = originalUpdates
+      .filter((update) => {
         const key = `${update.entityType}:${update.entityId}:${update.worldId}`;
-        const result = results.get(key);
+        const result = allResults.get(key);
         return result && result.success;
       })
-      .map(({ entityType, entityId, worldId }) => ({ entityType, entityId, worldId }));
+      .map(({ entityType, entityId, worldId, dirtyKey }) => {
+        const key = `${entityType}:${entityId}:${worldId}`;
+        const result = allResults.get(key);
+        return {
+          entityType,
+          entityId,
+          worldId,
+          dirtyKey,
+          persistedVersion: result.version // Include persisted version for race condition check
+        };
+      });
 
     await this.ephemeralManager.flushPersistedEntities(successfulKeys);
 

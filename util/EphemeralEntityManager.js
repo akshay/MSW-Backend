@@ -1,6 +1,9 @@
 // src/entities/EphemeralEntityManager.js
 import { ephemeralRedis, config } from '../config.js';
 import { InputValidator } from './InputValidator.js';
+import { EntityDiffUtil } from './EntityDiffUtil.js';
+import { KeyGenerator } from './KeyGenerator.js';
+import { StreamUpdateUtil } from './StreamUpdateUtil.js';
 
 export class EphemeralEntityManager {
   constructor(streamManager) {
@@ -8,6 +11,7 @@ export class EphemeralEntityManager {
     this.streamManager = streamManager;
     this.checkRedisJSONSupport();
     this.DIRTY_SET_KEY = 'ephemeral:dirty_entities'; // Set to track entities with pending updates
+    this.VERSION_CACHE_TTL = 3600; // 1 hour TTL for versioned snapshots
     // Store the set of ephemeral-only entity types that should NOT be persisted
     this.ephemeralOnlyTypes = new Set(config.entityTypes?.ephemeral || []);
   }
@@ -31,42 +35,13 @@ export class EphemeralEntityManager {
   // Ephemeral key includes entityType and worldId
   // If version is provided, include it in the cache key
   getEphemeralKey(entityType, entityId, worldId, version = null) {
-    if (version !== null) {
-      return `ephemeral:${entityType}:${worldId}:${entityId}:v${version}`;
-    }
-    return `ephemeral:${entityType}:${worldId}:${entityId}`;
+    return KeyGenerator.getEphemeralKey(entityType, entityId, worldId, version);
   }
 
   // Compute the difference between two entity versions
   // Returns only the attributes that changed
   computeEntityDiff(oldEntity, newEntity) {
-    if (!oldEntity) {
-      return newEntity;
-    }
-
-    const diff = {
-      ...newEntity,
-      attributes: {}
-    };
-
-    // Compare attributes
-    const oldAttrs = oldEntity.attributes || {};
-    const newAttrs = newEntity.attributes || {};
-
-    for (const [key, value] of Object.entries(newAttrs)) {
-      if (JSON.stringify(oldAttrs[key]) !== JSON.stringify(value)) {
-        diff.attributes[key] = value;
-      }
-    }
-
-    // Check for deleted attributes
-    for (const key of Object.keys(oldAttrs)) {
-      if (!(key in newAttrs)) {
-        diff.attributes[key] = InputValidator.NULL_MARKER;
-      }
-    }
-
-    return diff;
+    return EntityDiffUtil.computeEntityDiff(oldEntity, newEntity, { includeRankScores: false });
   }
 
   async batchSavePartial(updates) {
@@ -103,7 +78,7 @@ export class EphemeralEntityManager {
           const { entityType, entityId, worldId, attributes, isCreate = false, isDelete = false } = update;
           const key = batchKeys[batchIndex];
           const exists = batchExists[batchIndex];
-          const versionKey = `${key}:version`;
+          const versionKey = KeyGenerator.getVersionKey(entityType, entityId, worldId);
 
           // Validation: Reject updates based on existence and flags
           if (!exists && !isCreate) {
@@ -133,21 +108,38 @@ export class EphemeralEntityManager {
             return;
           }
 
-          // Track this entity as dirty for background persistence
+          // Track this entity as dirty for background persistence BEFORE the update
           // Skip ephemeral-only entity types that should not be persisted to DB
+          // This MUST happen before the entity update to prevent race conditions
           if (!this.isEphemeralOnly(entityType)) {
-            dirtyKeys.push(`${entityType}:${worldId}:${entityId}`);
+            const dirtyKey = KeyGenerator.getDirtyKey(entityType, entityId, worldId);
+            dirtyKeys.push(dirtyKey);
+            // Add to dirty set atomically with the update (for both updates and deletes)
+            pipeline.sadd(this.DIRTY_SET_KEY, dirtyKey);
           }
 
           // Handle deletion
           if (isDelete) {
-            // Delete the entity and its version counter
-            pipeline.call('JSON.DEL', key);
-            pipeline.del(versionKey);
+            // For non-ephemeral entities, mark as deleted but keep in Redis temporarily
+            // so background task can persist the deletion to the database
+            // For ephemeral-only entities, delete immediately
+            if (this.isEphemeralOnly(entityType)) {
+              // Delete the entity and its version counter immediately
+              pipeline.call('JSON.DEL', key);
+              pipeline.del(versionKey);
+            } else {
+              // Mark as deleted but keep the entity for background persistence
+              pipeline.call('JSON.SET', key, '$.isDeleted', true);
+              pipeline.call('JSON.SET', key, '$.lastWrite', timestamp);
+              // Increment version to track the deletion
+              const incrPosition = pipeline.length;
+              versionKeyIndices.push({ index: incrPosition, batchIndex, isCreate: false });
+              pipeline.incr(versionKey);
+            }
 
             // Add deletion to stream
             streamUpdates.push({
-              streamId: key,
+              streamId: KeyGenerator.getStreamId(entityType, worldId, entityId),
               data: { deleted: true }
             });
 
@@ -172,7 +164,7 @@ export class EphemeralEntityManager {
 
           // Prepare stream update data (excluding NULL_MARKER values)
           streamUpdates.push({
-            streamId: key, // Use cache key as streamId
+            streamId: KeyGenerator.getStreamId(entityType, worldId, entityId),
             data: streamData
           });
 
@@ -190,8 +182,9 @@ export class EphemeralEntityManager {
 
             pipeline.call('JSON.SET', key, '$', JSON.stringify(newEntity));
             // Set initial version counter
-            versionKeyIndices.push({ index: pipeline.length, batchIndex });
             pipeline.set(versionKey, '1');
+            // Track this for versioned cache
+            versionKeyIndices.push({ index: pipeline.length - 1, batchIndex, isCreate: true, version: 1 });
           } else {
             // Update existing entity attributes atomically (entity exists, validated above)
 
@@ -209,59 +202,54 @@ export class EphemeralEntityManager {
             pipeline.call('JSON.SET', key, '$.worldId', worldId);
             pipeline.call('JSON.SET', key, '$.lastWrite', timestamp);
 
-            // Atomically increment version
-            versionKeyIndices.push({ index: pipeline.length, batchIndex });
+            // Atomically increment version - track the position for extracting the new version
+            const incrPosition = pipeline.length;
+            versionKeyIndices.push({ index: incrPosition, batchIndex, isCreate: false });
             pipeline.incr(versionKey);
-
-            // Update version in JSON
-            pipeline.call('JSON.SET', key, '$.version', '__VERSION_PLACEHOLDER__');
           }
         });
 
         // Execute pipeline and get version numbers
         const pipelineResults = await pipeline.exec();
 
-        // Extract version numbers from results and cache versioned entities
-        const cachePipeline = this.redis.pipeline();
+        // Extract version numbers from results and update JSON atomically
+        const versionUpdatePipeline = this.redis.pipeline();
 
-        versionKeyIndices.forEach(({ index, batchIndex }) => {
-          const [error, version] = pipelineResults[index];
-          if (!error && version) {
-            const versionNum = parseInt(version);
+        versionKeyIndices.forEach(({ index, batchIndex, isCreate, version: createVersion }) => {
+          const [error, result] = pipelineResults[index];
+
+          if (!error && result) {
+            const versionNum = isCreate ? createVersion : parseInt(result);
             const update = batch[batchIndex];
             const { entityType, entityId, worldId } = update;
             const key = batchKeys[batchIndex];
 
-            // Update the version in the entity JSON
-            cachePipeline.call('JSON.SET', key, '$.version', versionNum);
+            // Update the version in the entity JSON atomically
+            versionUpdatePipeline.call('JSON.SET', key, '$.version', versionNum);
 
-            // Cache this version of the entity for future diff calculations
+            // Cache this version of the entity for future diff calculations with TTL
             const versionedKey = this.getEphemeralKey(entityType, entityId, worldId, versionNum);
-            cachePipeline.call('JSON.COPY', key, versionedKey);
+            versionUpdatePipeline.call('JSON.COPY', key, versionedKey);
+            versionUpdatePipeline.expire(versionedKey, this.VERSION_CACHE_TTL);
 
             results[i + batchIndex] = { version: versionNum, success: true };
           } else {
-            results[i + batchIndex] = { version: 1, success: true };
+            console.error(`Failed to get version for entity at index ${i + batchIndex}:`, error);
+            results[i + batchIndex] = { version: 1, success: true, warning: 'version_update_failed' };
           }
         });
 
-        // Execute cache pipeline (fire and forget)
-        setImmediate(() => cachePipeline.exec());
-
-        // Mark entities as dirty for background persistence
-        if (dirtyKeys.length > 0) {
-          setImmediate(() => this.redis.sadd(this.DIRTY_SET_KEY, ...dirtyKeys));
+        // Execute version update pipeline with error handling
+        try {
+          await versionUpdatePipeline.exec();
+        } catch (error) {
+          console.error('Failed to update versions and cache versioned entities:', error);
+          // Continue processing - entities are saved, just versioned cache failed
         }
       }
 
       // Batch add to streams (fire-and-forget for performance)
-      setImmediate(async () => {
-        try {
-          await this.streamManager.batchAddToStreams(streamUpdates);
-        } catch (error) {
-          console.warn('Stream updates failed for ephemeral entities:', error);
-        }
-      });
+      StreamUpdateUtil.scheduleStreamUpdates(this.streamManager, streamUpdates);
 
       return results;
 
@@ -297,38 +285,47 @@ export class EphemeralEntityManager {
         });
       });
 
-      // Create pipeline for JSON.GET operations for newest entities
-      const entityPipeline = this.redis.pipeline();
+      // Create single combined pipeline for all Redis operations
+      const combinedPipeline = this.redis.pipeline();
+
+      // Add JSON.GET operations for newest entities
       newestKeys.forEach(key => {
-        entityPipeline.call('JSON.GET', key);
+        combinedPipeline.call('JSON.GET', key);
       });
 
       // Also get versioned entities if requested
       versionedKeys.forEach(key => {
         if (key) {
-          entityPipeline.call('JSON.GET', key);
+          combinedPipeline.call('JSON.GET', key);
         }
       });
 
-      // Get world instance association keys for MGET
+      // Get world instance association keys
       const worldInstanceKeys = requests.map(({ entityType, entityId, worldId }) => {
-        const streamId = `entity:${entityType}:${worldId}:${entityId}`;
-        return this.streamManager.getWorldInstanceKey(streamId);
+        return this.streamManager.getWorldInstanceKey(
+          KeyGenerator.getStreamId(entityType, worldId, entityId)
+        );
       });
 
-      // Execute entity pipeline and MGET in parallel
-      const [pipelineResults, worldInstanceIds] = await Promise.all([
-        entityPipeline.exec(),
-        this.streamManager.redis.mget(worldInstanceKeys)
-      ]);
+      // Add world instance keys to the same pipeline
+      worldInstanceKeys.forEach(key => {
+        combinedPipeline.get(key);
+      });
 
-      // Parse results
+      // Execute single pipeline
+      const pipelineResults = await combinedPipeline.exec();
+
+      // Parse results - split them based on what we requested
       const newestEntities = pipelineResults.slice(0, requests.length);
-      let versionedEntityIndex = requests.length;
+      const versionedCount = versionedKeys.filter(k => k !== null).length;
+      const versionedEntities = pipelineResults.slice(requests.length, requests.length + versionedCount);
+      const worldInstanceResults = pipelineResults.slice(requests.length + versionedCount);
+
+      let versionedEntityIndex = 0;
 
       return requests.map((request, index) => {
         const [newestError, newestResult] = newestEntities[index];
-        const worldInstanceId = worldInstanceIds[index];
+        const [, worldInstanceId] = worldInstanceResults[index];
         const meta = requestMeta[index];
 
         if (newestError || !newestResult) {
@@ -346,7 +343,7 @@ export class EphemeralEntityManager {
         }
 
         // Get the versioned entity if it was requested
-        const [versionedError, versionedResult] = pipelineResults[versionedEntityIndex++];
+        const [versionedError, versionedResult] = versionedEntities[versionedEntityIndex++];
 
         if (versionedError || !versionedResult) {
           // Version not found in cache, return full newest entity
@@ -374,21 +371,25 @@ export class EphemeralEntityManager {
    */
   async getPendingUpdates(batchSize = 100) {
     try {
-      // Use SPOP to atomically get and remove entities from the dirty set
-      // This prevents processing the same entity multiple times
-      const dirtyKeys = await this.redis.spop(this.DIRTY_SET_KEY, batchSize);
+      // Use SRANDMEMBER to read entities without removing them
+      // They will only be removed after successful persistence
+      const dirtyKeys = await this.redis.srandmember(this.DIRTY_SET_KEY, batchSize);
 
       if (!dirtyKeys || dirtyKeys.length === 0) {
         return [];
       }
 
+      // Ensure dirtyKeys is an array (SRANDMEMBER returns single value or array)
+      const keysArray = Array.isArray(dirtyKeys) ? dirtyKeys : [dirtyKeys];
+
       // Parse the keys and load the full entities
-      const requests = dirtyKeys.map(key => {
-        const [entityType, worldIdStr, entityId] = key.split(':');
+      const requests = keysArray.map(key => {
+        const parsed = KeyGenerator.parseDirtyKey(key);
         return {
-          entityType,
-          entityId,
-          worldId: parseInt(worldIdStr)
+          entityType: parsed.entityType,
+          entityId: parsed.entityId,
+          worldId: parsed.worldId,
+          dirtyKey: key // Keep the original key for later removal
         };
       });
 
@@ -408,8 +409,9 @@ export class EphemeralEntityManager {
             attributes: entity.attributes || {},
             rankScores: entity.rankScores || {},
             version: entity.version,
+            dirtyKey: request.dirtyKey, // Include for later removal
             isCreate: false,
-            isDelete: false
+            isDelete: entity.isDeleted || false // Include isDelete flag from entity
           };
         })
         .filter(entity => entity !== null);
@@ -434,32 +436,119 @@ export class EphemeralEntityManager {
   }
 
   /**
+   * Remove entities from dirty set after successful persistence
+   * @param {Array} dirtyKeys - Array of dirty key strings
+   * @returns {Promise<void>}
+   */
+  async removeDirtyKeys(dirtyKeys) {
+    if (dirtyKeys.length === 0) return;
+
+    try {
+      await this.redis.srem(this.DIRTY_SET_KEY, ...dirtyKeys);
+      console.log(`Removed ${dirtyKeys.length} entities from dirty set after successful persistence`);
+    } catch (error) {
+      console.error('Failed to remove dirty keys:', error);
+    }
+  }
+
+  /**
    * Flush specific entities from ephemeral storage after successful persistence
-   * @param {Array} entityKeys - Array of {entityType, entityId, worldId} objects
+   * Uses version checking to prevent race conditions with concurrent updates
+   *
+   * @param {Array} entityKeys - Array of {entityType, entityId, worldId, dirtyKey, persistedVersion} objects
    * @returns {Promise<void>}
    */
   async flushPersistedEntities(entityKeys) {
     if (entityKeys.length === 0) return;
 
     try {
-      const pipeline = this.redis.pipeline();
+      // First, check current versions in ephemeral storage to avoid race conditions
+      const versionCheckPipeline = this.redis.pipeline();
 
       entityKeys.forEach(({ entityType, entityId, worldId }) => {
-        const key = this.getEphemeralKey(entityType, entityId, worldId);
+        const versionKey = KeyGenerator.getVersionKey(entityType, entityId, worldId);
+        versionCheckPipeline.get(versionKey);
+      });
 
-        // Remove the main entity
-        pipeline.call('JSON.DEL', key);
+      const versionResults = await versionCheckPipeline.exec();
 
-        // Remove the version counter
-        pipeline.del(`${key}:version`);
+      // Build Lua script for atomic conditional deletion
+      // Only delete if current version <= persisted version (or entity doesn't exist)
+      const luaScript = `
+        local key = KEYS[1]
+        local versionKey = KEYS[2]
+        local persistedVersion = tonumber(ARGV[1])
+
+        local currentVersion = redis.call('GET', versionKey)
+
+        -- If entity doesn't exist or persisted version is newer/equal, delete it
+        if not currentVersion or not persistedVersion or tonumber(currentVersion) <= persistedVersion then
+          redis.call('JSON.DEL', key)
+          redis.call('DEL', versionKey)
+          return 1
+        else
+          -- Entity has been updated since persistence, keep it
+          return 0
+        end
+      `;
+
+      const deletionPipeline = this.redis.pipeline();
+      const dirtyKeysToRemove = [];
+      const safeToDeleteIndices = [];
+
+      entityKeys.forEach(({ entityType, entityId, worldId, dirtyKey, persistedVersion }, index) => {
+        const [, currentVersionStr] = versionResults[index];
+        const currentVersion = currentVersionStr ? parseInt(currentVersionStr) : null;
+        const persisted = persistedVersion || 0;
+
+        // Check if safe to delete
+        if (!currentVersion || !persisted || currentVersion <= persisted) {
+          const key = this.getEphemeralKey(entityType, entityId, worldId);
+          const versionKey = KeyGenerator.getVersionKey(entityType, entityId, worldId);
+
+          // Use Lua script for atomic conditional deletion
+          deletionPipeline.eval(luaScript, 2, key, versionKey, persisted);
+
+          safeToDeleteIndices.push(index);
+
+          // Collect dirty keys for removal
+          if (dirtyKey) {
+            dirtyKeysToRemove.push(dirtyKey);
+          } else {
+            dirtyKeysToRemove.push(KeyGenerator.getDirtyKey(entityType, entityId, worldId));
+          }
+        } else {
+          // Entity was updated after persistence, don't delete
+          console.log(
+            `Skipping flush for ${entityType}:${entityId}:${worldId} - ` +
+            `current version (${currentVersion}) > persisted version (${persisted})`
+          );
+        }
 
         // Note: We don't delete versioned entities (with :vN suffix)
         // as they may still be useful for diff calculations
-        // They will expire naturally or be cleaned up by LRU
+        // They will expire naturally based on VERSION_CACHE_TTL
       });
 
-      await pipeline.exec();
-      console.log(`Flushed ${entityKeys.length} persisted entities from ephemeral storage`);
+      // Execute conditional deletions
+      if (safeToDeleteIndices.length > 0) {
+        const deletionResults = await deletionPipeline.exec();
+
+        // Count actual deletions (where Lua script returned 1)
+        const actualDeletions = deletionResults.filter(([err, result]) => !err && result === 1).length;
+
+        // Remove from dirty set
+        if (dirtyKeysToRemove.length > 0) {
+          await this.removeDirtyKeys(dirtyKeysToRemove);
+        }
+
+        console.log(
+          `Flushed ${actualDeletions}/${entityKeys.length} persisted entities from ephemeral storage ` +
+          `(${entityKeys.length - safeToDeleteIndices.length} skipped due to newer versions)`
+        );
+      } else {
+        console.log(`No entities flushed - all ${entityKeys.length} have newer versions in ephemeral storage`);
+      }
 
     } catch (error) {
       console.error('Failed to flush persisted entities:', error);

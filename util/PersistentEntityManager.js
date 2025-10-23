@@ -1,7 +1,10 @@
 // src/entities/PersistentEntityManager.js
-import { prisma, cacheTTL } from '../config.js';
+import { prisma, cacheTTL, config } from '../config.js';
 import { InputValidator } from './InputValidator.js';
+import { EntityDiffUtil } from './EntityDiffUtil.js';
+import { KeyGenerator } from './KeyGenerator.js';
 import { metrics } from './MetricsCollector.js';
+import { StreamUpdateUtil } from './StreamUpdateUtil.js';
 
 export class PersistentEntityManager {
   constructor(cacheManager, streamManager, ephemeralManager = null) {
@@ -9,72 +12,25 @@ export class PersistentEntityManager {
     this.prisma = prisma;
     this.streamManager = streamManager;
     this.ephemeralManager = ephemeralManager;
+    this.BATCH_SIZE = config.persistent.batchSize;
   }
 
   // Generate cache key (worldId always included)
   // If version is provided, include it in the cache key
   getCacheKey(entityType, entityId, worldId, version = null) {
-    if (version !== null) {
-      return `entity:${entityType}:${worldId}:${entityId}:v${version}`;
-    }
-    return `entity:${entityType}:${worldId}:${entityId}`;
+    return KeyGenerator.getCacheKey(entityType, entityId, worldId, version);
   }
 
   // Compute the difference between two entity versions
   // Returns only the attributes and rankScores that changed
   computeEntityDiff(oldEntity, newEntity) {
-    if (!oldEntity) {
-      return newEntity;
-    }
-
-    const diff = {
-      ...newEntity,
-      attributes: {},
-      rankScores: {}
-    };
-
-    // Compare attributes
-    const oldAttrs = oldEntity.attributes || {};
-    const newAttrs = newEntity.attributes || {};
-
-    for (const [key, value] of Object.entries(newAttrs)) {
-      if (JSON.stringify(oldAttrs[key]) !== JSON.stringify(value)) {
-        diff.attributes[key] = value;
-      }
-    }
-
-    // Check for deleted attributes
-    for (const key of Object.keys(oldAttrs)) {
-      if (!(key in newAttrs)) {
-        diff.attributes[key] = InputValidator.NULL_MARKER;
-      }
-    }
-
-    // Compare rankScores
-    const oldRanks = oldEntity.rankScores || {};
-    const newRanks = newEntity.rankScores || {};
-
-    for (const [key, value] of Object.entries(newRanks)) {
-      if (JSON.stringify(oldRanks[key]) !== JSON.stringify(value)) {
-        diff.rankScores[key] = value;
-      }
-    }
-
-    // Check for deleted rank scores
-    for (const key of Object.keys(oldRanks)) {
-      if (!(key in newRanks)) {
-        diff.rankScores[key] = InputValidator.NULL_MARKER;
-      }
-    }
-
-    return diff;
+    return EntityDiffUtil.computeEntityDiff(oldEntity, newEntity, { includeRankScores: true });
   }
 
   async batchLoad(requests) {
     if (requests.length === 0) return [];
 
-    // Group requests by (entityType, worldId) for efficient querying
-    const requestGroups = new Map();
+    // Build cache keys for DB entities
     const cacheKeys = [];
     const requestIndexMap = new Map();
 
@@ -82,12 +38,8 @@ export class PersistentEntityManager {
       const { entityType, entityId, worldId, version = 0 } = request;
       const newestCacheKey = this.getCacheKey(entityType, entityId, worldId);
       const versionedCacheKey = version > 0 ? this.getCacheKey(entityType, entityId, worldId, version) : null;
-      const groupKey = `${entityType}:${worldId}`;
 
-      // Always check the newest version
       cacheKeys.push(newestCacheKey);
-
-      // Also check versioned cache if version is specified
       if (versionedCacheKey) {
         cacheKeys.push(versionedCacheKey);
       }
@@ -97,26 +49,36 @@ export class PersistentEntityManager {
         versionedCacheKey,
         request
       });
-
-      if (!requestGroups.has(groupKey)) {
-        requestGroups.set(groupKey, []);
-      }
-      requestGroups.get(groupKey).push({ ...request, index });
     });
 
     // Get world instance association keys for MGET
     const worldInstanceKeys = requests.map(({ entityType, entityId, worldId }) => {
-      const streamId = `entity:${entityType}:${worldId}:${entityId}`;
+      const streamId = KeyGenerator.getStreamId(entityType, worldId, entityId);
       return this.streamManager.getWorldInstanceKey(streamId);
     });
 
-    // Batch check cache for all entities (newest + versioned) in parallel with world instance fetch
-    const [cacheResults, worldInstanceIds] = await Promise.all([
+    // ALWAYS check ephemeral storage for all requests (cache hits and misses)
+    const ephemeralRequests = requests.map(({ entityType, entityId, worldId, version = 0 }) => ({
+      entityType,
+      entityId,
+      worldId,
+      version
+    }));
+
+    // Batch check cache, world instances, and ephemeral storage in parallel
+    const [cacheResults, worldInstanceIds, ephemeralEntities] = await Promise.all([
       this.cache.mget(cacheKeys),
-      this.streamManager.redis.mget(worldInstanceKeys)
+      this.streamManager.redis.mget(worldInstanceKeys),
+      this.ephemeralManager
+        ? this.ephemeralManager.batchLoad(ephemeralRequests).catch(error => {
+            console.warn('Failed to check ephemeral manager:', error);
+            return requests.map(() => null);
+          })
+        : Promise.resolve(requests.map(() => null))
     ]);
 
-    const resultMap = new Map();
+    // Store DB entities (from cache or will be loaded)
+    const dbEntityMap = new Map();
     const cacheMisses = [];
 
     requests.forEach((request, index) => {
@@ -125,16 +87,9 @@ export class PersistentEntityManager {
       const versionedCached = versionedCacheKey ? cacheResults.get(versionedCacheKey) : null;
 
       if (newestCached) {
-        // Cache hit
+        // Cache hit - store DB entity
         metrics.recordCacheHit(request.entityType);
-
-        // If we have both versions, compute the diff
-        if (versionedCached && request.version > 0) {
-          const diff = this.computeEntityDiff(versionedCached, newestCached);
-          resultMap.set(index, diff);
-        } else {
-          resultMap.set(index, newestCached);
-        }
+        dbEntityMap.set(index, { newest: newestCached, versioned: versionedCached });
       } else {
         // Cache miss
         metrics.recordCacheMiss(request.entityType);
@@ -142,7 +97,7 @@ export class PersistentEntityManager {
       }
     });
 
-    // Batch load cache misses grouped by entity type and world
+    // Batch load cache misses from database
     if (cacheMisses.length > 0) {
       const missGroups = new Map();
       cacheMisses.forEach(miss => {
@@ -181,23 +136,7 @@ export class PersistentEntityManager {
 
       const groupResults = await Promise.all(groupQueryPromises);
 
-      // Check ephemeral manager for any dirty updates
-      let ephemeralEntities = [];
-      if (this.ephemeralManager) {
-        const ephemeralRequests = cacheMisses.map(miss => ({
-          entityType: miss.entityType,
-          entityId: miss.entityId,
-          worldId: miss.worldId
-        }));
-
-        try {
-          ephemeralEntities = await this.ephemeralManager.batchLoad(ephemeralRequests);
-        } catch (error) {
-          console.warn('Failed to check ephemeral manager for dirty updates:', error);
-        }
-      }
-
-      // Process all group results and update cache
+      // Process results and cache ONLY DB entities (not merged with ephemeral)
       const allCacheEntries = [];
 
       groupResults.forEach(({ misses, dbEntities }) => {
@@ -210,77 +149,94 @@ export class PersistentEntityManager {
           const matchingMiss = indexedMisses.get(entity.id);
 
           if (matchingMiss) {
-            // Check if there's a dirty update in ephemeral storage
-            const ephemeralEntity = ephemeralEntities[matchingMiss.index];
-            let finalEntity = entity;
+            // Cache ONLY the DB entity (without ephemeral merge)
+            const newestCacheKey = this.getCacheKey(entity.entityType, entity.id, entity.worldId);
+            allCacheEntries.push([newestCacheKey, entity]);
 
-            if (ephemeralEntity && ephemeralEntity.attributes) {
-              // Merge ephemeral updates with DB entity
-              finalEntity = {
-                ...entity,
-                attributes: {
-                  ...(entity.attributes || {}),
-                  ...(ephemeralEntity.attributes || {})
-                },
-                rankScores: {
-                  ...(entity.rankScores || {}),
-                  ...(ephemeralEntity.rankScores || {})
-                },
-                // Use ephemeral version if it's newer (or same for consistency)
-                version: ephemeralEntity.version || entity.version
-              };
-            }
+            // Also cache versioned entity
+            const versionedCacheKey = this.getCacheKey(entity.entityType, entity.id, entity.worldId, entity.version);
+            allCacheEntries.push([versionedCacheKey, entity]);
 
-            // Cache the newest version (without version in key)
-            const newestCacheKey = this.getCacheKey(finalEntity.entityType, finalEntity.id, finalEntity.worldId);
-            allCacheEntries.push([newestCacheKey, finalEntity]);
-
-            // Also cache the versioned entity (with version in key)
-            const versionedCacheKey = this.getCacheKey(finalEntity.entityType, finalEntity.id, finalEntity.worldId, finalEntity.version);
-            allCacheEntries.push([versionedCacheKey, finalEntity]);
-
-            // Compute diff if we have a versioned entity from earlier
-            if (matchingMiss.versionedCached && matchingMiss.version > 0) {
-              const diff = this.computeEntityDiff(matchingMiss.versionedCached, finalEntity);
-              resultMap.set(matchingMiss.index, diff);
-            } else {
-              resultMap.set(matchingMiss.index, finalEntity);
-            }
+            // Store in dbEntityMap
+            dbEntityMap.set(matchingMiss.index, {
+              newest: entity,
+              versioned: matchingMiss.versionedCached
+            });
 
             // Track dependencies
-            this.cache.trackDependencies(newestCacheKey, [`${finalEntity.entityType}:${finalEntity.id}`]);
+            this.cache.trackDependencies(newestCacheKey, [`${entity.entityType}:${entity.id}`]);
           }
         });
       });
 
-      // Batch update cache
+      // Batch update cache with DB entities only
       if (allCacheEntries.length > 0) {
         setImmediate(() => this.cache.mset(allCacheEntries, this.cache.defaultTTL));
       }
     }
 
-    // Return results in original order with worldInstanceId
-    return requests.map((_, index) => {
-      const entity = resultMap.get(index) || InputValidator.NULL_MARKER;
+    // Merge DB entities with ephemeral updates for ALL requests
+    return requests.map((request, index) => {
+      const dbEntity = dbEntityMap.get(index);
+      const ephemeralEntity = ephemeralEntities[index];
       const worldInstanceId = worldInstanceIds[index];
 
-      // Add worldInstanceId to the entity (empty string if no association exists)
-      if (entity !== InputValidator.NULL_MARKER) {
-        entity.worldInstanceId = worldInstanceId || '';
+      // If entity is deleted in ephemeral storage, return null
+      if (ephemeralEntity && ephemeralEntity.isDeleted) {
+        return InputValidator.NULL_MARKER;
       }
 
-      return entity;
+      // If no DB entity, return ephemeral entity (or null if no ephemeral either)
+      if (!dbEntity || !dbEntity.newest) {
+        if (ephemeralEntity && ephemeralEntity.attributes) {
+          // Return the ephemeral entity with worldInstanceId
+          return {
+            ...ephemeralEntity,
+            worldInstanceId: worldInstanceId || ''
+          };
+        }
+        return InputValidator.NULL_MARKER;
+      }
+
+      let finalEntity = dbEntity.newest;
+
+      // Merge with ephemeral updates if present
+      if (ephemeralEntity && ephemeralEntity.attributes) {
+        finalEntity = {
+          ...dbEntity.newest,
+          attributes: {
+            ...(dbEntity.newest.attributes || {}),
+            ...(ephemeralEntity.attributes || {})
+          },
+          rankScores: {
+            ...(dbEntity.newest.rankScores || {}),
+            ...(ephemeralEntity.rankScores || {})
+          },
+          version: ephemeralEntity.version || dbEntity.newest.version
+        };
+      }
+
+      // Add worldInstanceId
+      finalEntity.worldInstanceId = worldInstanceId || '';
+
+      // Handle version diff if requested
+      if (request.version > 0 && dbEntity.versioned) {
+        const diff = this.computeEntityDiff(dbEntity.versioned, finalEntity);
+        diff.worldInstanceId = worldInstanceId || '';
+        return diff;
+      }
+
+      return finalEntity;
     });
   }
 
   async performBatchUpsert(mergedUpdates) {
-    const batchSize = 5000; // Increased batch size for better throughput
     const updateEntries = Array.from(mergedUpdates.entries());
     const streamUpdates = []; // Collect stream updates
     const resultMap = new Map(); // Map to store results by entity key
 
-    for (let i = 0; i < updateEntries.length; i += batchSize) {
-      const batch = updateEntries.slice(i, i + batchSize);
+    for (let i = 0; i < updateEntries.length; i += this.BATCH_SIZE) {
+      const batch = updateEntries.slice(i, i + this.BATCH_SIZE);
 
       // Prepare batch data for the function with input validation
       const batchData = batch.map(([, { entityType, entityId, worldId, attributes, rankScores, isCreate, isDelete }]) => {
@@ -299,7 +255,7 @@ export class PersistentEntityManager {
         }
 
         // Prepare stream update
-        const streamId = `entity:${entityType}:${worldId}:${entityId}`;
+        const streamId = KeyGenerator.getStreamId(entityType, worldId, entityId);
         const streamData = {};
 
         if (isDelete) {
@@ -375,71 +331,90 @@ export class PersistentEntityManager {
         }
       }
 
-      // Read from cache and update the entries that already exist
-      const cacheKeys = batch.map(([_, { entityType, entityId, worldId }]) =>
-        this.getCacheKey(entityType, entityId, worldId)
-      );
-
-      const cachedEntities = await this.cache.mget(cacheKeys);
+      // Update cache for successful operations without reading first
+      // Only need to read if we want to preserve non-updated fields
       const cacheEntries = [];
 
-      batch.forEach(([entityKey, update], index) => {
+      batch.forEach(([entityKey, update]) => {
         const { entityType, entityId, worldId } = update;
-        const cacheKey = cacheKeys[index];
-        const cached = cachedEntities.get(cacheKey);
         const result = resultMap.get(entityKey);
 
-        if (cached && result && result.success) {
-          // Update the cached entity with the new data
-          const updatedEntity = { ...cached };
+        if (result && result.success) {
+          // Build cache key to check if entity might be cached
+          const cacheKey = this.getCacheKey(entityType, entityId, worldId);
 
-          // Merge attributes
-          if (update.attributes) {
-            updatedEntity.attributes = {
-              ...(updatedEntity.attributes || {}),
-              ...update.attributes
-            };
-          }
-
-          // Merge rankScores
-          if (update.rankScores) {
-            updatedEntity.rankScores = {
-              ...(updatedEntity.rankScores || {}),
-              ...update.rankScores
-            };
-          }
-
-          // Update version from database result
-          updatedEntity.version = result.version;
-
-          // Update worldId
-          updatedEntity.worldId = worldId;
-
-          // Cache the updated entity (both newest and versioned)
-          const newestCacheKey = this.getCacheKey(entityType, entityId, worldId);
-          const versionedCacheKey = this.getCacheKey(entityType, entityId, worldId, result.version);
-
-          cacheEntries.push([newestCacheKey, updatedEntity]);
-          cacheEntries.push([versionedCacheKey, updatedEntity]);
-
-          // Track dependencies
-          this.cache.trackDependencies(newestCacheKey, [`${entityType}:${entityId}`]);
+          // For updates (non-delete), we need to check if entity is in cache
+          // If it is, we'll update it; if not, we'll skip caching
+          // This defers the read to a batched check after all updates
+          cacheEntries.push({
+            entityKey,
+            entityType,
+            entityId,
+            worldId,
+            update,
+            result,
+            cacheKey
+          });
         }
       });
 
+      // Now batch read only the cache keys we need to update
       if (cacheEntries.length > 0) {
-        setImmediate(() => this.cache.mset(cacheEntries, this.cache.defaultTTL));
+        const keysToCheck = cacheEntries.map(e => e.cacheKey);
+        const cachedEntities = await this.cache.mget(keysToCheck);
+        const finalCacheUpdates = [];
+
+        cacheEntries.forEach((entry, index) => {
+          const { entityType, entityId, worldId, update, result } = entry;
+          const cached = cachedEntities.get(keysToCheck[index]);
+
+          if (cached) {
+            // Entity is in cache, update it
+            const updatedEntity = { ...cached };
+
+            // Merge attributes
+            if (update.attributes) {
+              updatedEntity.attributes = {
+                ...(updatedEntity.attributes || {}),
+                ...update.attributes
+              };
+            }
+
+            // Merge rankScores
+            if (update.rankScores) {
+              updatedEntity.rankScores = {
+                ...(updatedEntity.rankScores || {}),
+                ...update.rankScores
+              };
+            }
+
+            // Update version from database result
+            updatedEntity.version = result.version;
+
+            // Update worldId
+            updatedEntity.worldId = worldId;
+
+            // Cache the updated entity (both newest and versioned)
+            const newestCacheKey = this.getCacheKey(entityType, entityId, worldId);
+            const versionedCacheKey = this.getCacheKey(entityType, entityId, worldId, result.version);
+
+            finalCacheUpdates.push([newestCacheKey, updatedEntity]);
+            finalCacheUpdates.push([versionedCacheKey, updatedEntity]);
+
+            // Track dependencies
+            this.cache.trackDependencies(newestCacheKey, [`${entityType}:${entityId}`]);
+          }
+          // If not in cache, skip caching (entity will be loaded from DB if needed)
+        });
+
+        if (finalCacheUpdates.length > 0) {
+          setImmediate(() => this.cache.mset(finalCacheUpdates, this.cache.defaultTTL));
+        }
       }
     }
 
     // Batch add to streams (fire-and-forget for performance)
-    setImmediate(async () => {
-      try {
-        await this.streamManager.batchAddToStreams(streamUpdates);
-      } catch (error) {
-        console.warn('Stream updates failed for persistent entities:', error);
-      }
-    });
+    StreamUpdateUtil.scheduleStreamUpdates(this.streamManager, streamUpdates);
 
     console.log(`Atomic batch upsert completed: ${mergedUpdates.size} entities`);
     return resultMap;

@@ -48,6 +48,28 @@ jest.mock('../config.js', () => ({
   config: {
     entityTypes: {
       ephemeral: ['session', 'temporary_data']
+    },
+    ephemeral: {
+      versionCacheTTL: 3600,
+      batchSize: 5000
+    },
+    backgroundPersistence: {
+      lockTTL: 10,
+      batchSize: 500,
+      intervalMs: 5000,
+      maxRetries: 3,
+      retryDelayMs: 1000
+    },
+    persistent: {
+      batchSize: 5000
+    },
+    stream: {
+      worldInstanceTTL: 3
+    },
+    lock: {
+      defaultTTL: 10,
+      retryDelayMs: 100,
+      maxRetries: 3
     }
   }
 }));

@@ -52,10 +52,42 @@ export const memoryCache = new NodeCache({
 export const config = {
   port: process.env.PORT || 3000,
   nodeEnv: process.env.NODE_ENV || 'development',
-  
+
   // Entity type configuration
   entityTypes: {
     persistent: ['Account', 'Guild', 'Alliance', 'Party', 'PlayerCharacter'],
     ephemeral: ['OnlineMapData', 'Channel', 'World']
+  },
+
+  // TTL configurations (in seconds)
+  ephemeral: {
+    versionCacheTTL: parseInt(process.env.EPHEMERAL_VERSION_CACHE_TTL_SECONDS) || 3600, // Default: 1 hour
+    batchSize: parseInt(process.env.EPHEMERAL_BATCH_SIZE) || 5000 // Default: 5000
+  },
+
+  // Background persistence configurations
+  backgroundPersistence: {
+    lockTTL: parseInt(process.env.BG_PERSISTENCE_LOCK_TTL_SECONDS) || 10, // Default: 10 seconds
+    batchSize: parseInt(process.env.BG_PERSISTENCE_BATCH_SIZE) || 500, // Default: 500
+    intervalMs: parseInt(process.env.BG_PERSISTENCE_INTERVAL_MS) || 5000, // Default: 5 seconds
+    maxRetries: parseInt(process.env.BG_PERSISTENCE_MAX_RETRIES) || 3, // Default: 3
+    retryDelayMs: parseInt(process.env.BG_PERSISTENCE_RETRY_DELAY_MS) || 1000 // Default: 1 second
+  },
+
+  // Persistent entity configurations
+  persistent: {
+    batchSize: parseInt(process.env.PERSISTENT_BATCH_SIZE) || 5000 // Default: 5000
+  },
+
+  // Stream configurations
+  stream: {
+    worldInstanceTTL: parseInt(process.env.STREAM_WORLD_INSTANCE_TTL_SECONDS) || Math.floor(cacheTTL / 100) || 3 // Default: cacheTTL/100 or 3 seconds
+  },
+
+  // Distributed lock configurations
+  lock: {
+    defaultTTL: parseInt(process.env.LOCK_DEFAULT_TTL_SECONDS) || 10, // Default: 10 seconds
+    retryDelayMs: parseInt(process.env.LOCK_RETRY_DELAY_MS) || 100, // Default: 100ms
+    maxRetries: parseInt(process.env.LOCK_MAX_RETRIES) || 3 // Default: 3
   }
 };

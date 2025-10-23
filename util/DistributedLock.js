@@ -1,4 +1,5 @@
 // util/DistributedLock.js
+import { config } from '../config.js';
 import { metrics } from './MetricsCollector.js';
 
 export class DistributedLock {
@@ -13,7 +14,7 @@ export class DistributedLock {
    * @param {string} lockValue - Unique value for this lock holder
    * @returns {Promise<boolean>} - True if lock was acquired, false otherwise
    */
-  async acquire(lockKey, ttl = 10, lockValue = null) {
+  async acquire(lockKey, ttl = config.lock.defaultTTL, lockValue = null) {
     const value = lockValue || `${process.pid}-${Date.now()}-${Math.random()}`;
 
     try {
@@ -72,7 +73,7 @@ export class DistributedLock {
    * @param {number} ttl - Time to live in seconds
    * @returns {Promise<any>} - The result of the function
    */
-  async withLock(lockKey, fn, ttl = 10) {
+  async withLock(lockKey, fn, ttl = config.lock.defaultTTL) {
     const { acquired, value } = await this.acquire(lockKey, ttl);
 
     if (!acquired) {
@@ -95,7 +96,7 @@ export class DistributedLock {
    * @param {number} retryDelay - Delay between retries in milliseconds
    * @returns {Promise<{acquired: boolean, value: string}>}
    */
-  async acquireWithRetry(lockKey, ttl = 10, maxRetries = 3, retryDelay = 100) {
+  async acquireWithRetry(lockKey, ttl = config.lock.defaultTTL, maxRetries = config.lock.maxRetries, retryDelay = config.lock.retryDelayMs) {
     for (let i = 0; i < maxRetries; i++) {
       const result = await this.acquire(lockKey, ttl);
 

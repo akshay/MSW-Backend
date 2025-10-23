@@ -24,6 +24,22 @@ const createMockPipeline = () => {
       commandCounter++;
       return this;
     }),
+    sadd: jest.fn(function() {
+      commandCounter++;
+      return this;
+    }),
+    srem: jest.fn(function() {
+      commandCounter++;
+      return this;
+    }),
+    get: jest.fn(function() {
+      commandCounter++;
+      return this;
+    }),
+    eval: jest.fn(function() {
+      commandCounter++;
+      return this;
+    }),
     exec: jest.fn(),
     get length() {
       return commandCounter;
@@ -68,19 +84,45 @@ jest.mock('../config.js', () => ({
       set: jest.fn().mockReturnThis(),
       del: jest.fn().mockReturnThis(),
       incr: jest.fn().mockReturnThis(),
+      sadd: jest.fn().mockReturnThis(),
+      srem: jest.fn().mockReturnThis(),
+      get: jest.fn().mockReturnThis(),
       exec: jest.fn()
     })),
     get: jest.fn(),
     set: jest.fn(),
     expire: jest.fn(),
     sadd: jest.fn(),
-    spop: jest.fn(),
+    srandmember: jest.fn(),
+    srem: jest.fn(),
     scard: jest.fn()
   },
   config: {
     entityTypes: {
       persistent: ['Account', 'Guild', 'Alliance', 'Party', 'PlayerCharacter'],
       ephemeral: ['OnlineMapData', 'Channel', 'World']
+    },
+    ephemeral: {
+      versionCacheTTL: 3600,
+      batchSize: 5000
+    },
+    backgroundPersistence: {
+      lockTTL: 10,
+      batchSize: 500,
+      intervalMs: 5000,
+      maxRetries: 3,
+      retryDelayMs: 1000
+    },
+    persistent: {
+      batchSize: 5000
+    },
+    stream: {
+      worldInstanceTTL: 3
+    },
+    lock: {
+      defaultTTL: 10,
+      retryDelayMs: 100,
+      maxRetries: 3
     }
   }
 }));
@@ -154,21 +196,23 @@ describe('EphemeralEntityManager', () => {
           entityType: 'player',
           entityId: 'user123',
           worldId: 1,
-          attributes: { level: 10, gold: 500 }
+          attributes: { level: 10, gold: 500 },
+          isCreate: true
         },
         {
           entityType: 'session',
           entityId: 'sess456',
           worldId: 1,
-          attributes: { lastActive: '2023-01-01' }
+          attributes: { lastActive: '2023-01-01' },
+          isCreate: true
         }
       ];
 
       // Configure pipeline mocks before calling the method
-      // The method will create 2 pipelines: existence check, main pipeline
+      // Now creates 3 pipelines: existence check, main pipeline, version update pipeline
       const existsPipeline = createMockPipeline();
       const mainPipeline = createMockPipeline();
-      const cachePipeline = createMockPipeline();
+      const versionPipeline = createMockPipeline();
 
       let pipelineCallCount = 0;
       ephemeralManager.redis.pipeline = jest.fn(() => {
@@ -179,18 +223,32 @@ describe('EphemeralEntityManager', () => {
           pipelineCallCount++;
           return mainPipeline;
         } else {
-          return cachePipeline;
+          return versionPipeline;
         }
       });
 
       // Mock existence check - entities don't exist
       existsPipeline.exec.mockResolvedValueOnce([[null, null], [null, null]]);
 
-      // Mock main pipeline - JSON.SET + set version for each entity
-      mainPipeline.exec.mockResolvedValueOnce([[null, 'OK'], [null, '1'], [null, 'OK'], [null, '1']]);
+      // Mock main pipeline - sadd (dirty), JSON.SET, set version for each entity
+      mainPipeline.exec.mockResolvedValueOnce([
+        [null, 1], // sadd for player
+        [null, 'OK'], // JSON.SET player
+        [null, '1'], // set version player
+        [null, 1], // sadd for session
+        [null, 'OK'], // JSON.SET session
+        [null, '1'] // set version session
+      ]);
 
-      // Mock cache pipeline (fire and forget)
-      cachePipeline.exec.mockResolvedValueOnce([]);
+      // Mock version update pipeline - JSON.SET version, JSON.COPY, expire for each
+      versionPipeline.exec.mockResolvedValueOnce([
+        [null, 'OK'], // JSON.SET version player
+        [null, 'OK'], // JSON.COPY player
+        [null, 1], // expire player
+        [null, 'OK'], // JSON.SET version session
+        [null, 'OK'], // JSON.COPY session
+        [null, 1] // expire session
+      ]);
 
       // Mock stream manager
       mockStreamManager.batchAddToStreams.mockResolvedValueOnce([]);
@@ -202,6 +260,12 @@ describe('EphemeralEntityManager', () => {
         { success: true, version: 1 }
       ]);
 
+      // Verify sadd calls for dirty set
+      expect(mainPipeline.sadd).toHaveBeenCalledWith(
+        'ephemeral:dirty_entities',
+        'player:1:user123'
+      );
+
       // Verify JSON.SET calls for new entities
       expect(mainPipeline.call).toHaveBeenCalledWith(
         'JSON.SET',
@@ -209,8 +273,6 @@ describe('EphemeralEntityManager', () => {
         '$',
         expect.stringContaining('"type":"ephemeral"')
       );
-
-      // Note: Ephemeral entities don't set explicit TTL - they rely on Redis eviction policies
     });
 
     test('should successfully update existing entities', async () => {
@@ -225,7 +287,7 @@ describe('EphemeralEntityManager', () => {
 
       const existsPipeline = createMockPipeline();
       const mainPipeline = createMockPipeline();
-      const cachePipeline = createMockPipeline();
+      const versionPipeline = createMockPipeline();
 
       let pipelineCallCount = 0;
       ephemeralManager.redis.pipeline = jest.fn(() => {
@@ -236,29 +298,41 @@ describe('EphemeralEntityManager', () => {
           pipelineCallCount++;
           return mainPipeline;
         } else {
-          return cachePipeline;
+          return versionPipeline;
         }
       });
 
       // Mock existence check - entity exists
       existsPipeline.exec.mockResolvedValueOnce([[null, 'object']]);
 
-      // Mock main pipeline
+      // Mock main pipeline - now includes sadd for dirty set
       mainPipeline.exec.mockResolvedValueOnce([
+        [null, 1],    // sadd for dirty set
         [null, 'OK'], // JSON.SET level
         [null, 'OK'], // JSON.SET experience
         [null, 'OK'], // JSON.SET worldId
         [null, 'OK'], // JSON.SET lastWrite
-        [null, 2],    // incr version
-        [null, 'OK']  // JSON.SET version placeholder
+        [null, 2]     // incr version
       ]);
 
-      cachePipeline.exec.mockResolvedValueOnce([]);
+      // Mock version update pipeline
+      versionPipeline.exec.mockResolvedValueOnce([
+        [null, 'OK'], // JSON.SET version
+        [null, 'OK'], // JSON.COPY
+        [null, 1]     // expire
+      ]);
+
       mockStreamManager.batchAddToStreams.mockResolvedValueOnce([]);
 
       const result = await ephemeralManager.batchSavePartial(updates);
 
       expect(result).toEqual([{ success: true, version: 2 }]);
+
+      // Verify sadd for dirty set
+      expect(mainPipeline.sadd).toHaveBeenCalledWith(
+        'ephemeral:dirty_entities',
+        'player:1:user123'
+      );
 
       // Verify JSON.SET calls for updating existing entity attributes
       expect(mainPipeline.call).toHaveBeenCalledWith(
@@ -287,12 +361,13 @@ describe('EphemeralEntityManager', () => {
         entityType: 'player',
         entityId: `user${i}`,
         worldId: 1,
-        attributes: { level: i + 1 }
+        attributes: { level: i + 1 },
+        isCreate: true
       }));
 
       const existsPipeline = createMockPipeline();
       const mainPipeline = createMockPipeline();
-      const cachePipeline = createMockPipeline();
+      const versionPipeline = createMockPipeline();
 
       let pipelineCallCount = 0;
       ephemeralManager.redis.pipeline = jest.fn(() => {
@@ -303,7 +378,7 @@ describe('EphemeralEntityManager', () => {
           pipelineCallCount++;
           return mainPipeline;
         } else {
-          return cachePipeline;
+          return versionPipeline;
         }
       });
 
@@ -311,14 +386,22 @@ describe('EphemeralEntityManager', () => {
       const existsResults = Array.from({ length: 150 }, () => [null, null]);
       existsPipeline.exec.mockResolvedValueOnce(existsResults);
 
-      // For each new entity: JSON.SET + set version = 2 commands per entity
+      // For each new entity: sadd + JSON.SET + set version = 3 commands per entity
       const mainPipelineResults = Array.from({ length: 150 }, () => [
+        [null, 1],     // sadd
         [null, 'OK'],  // JSON.SET
         [null, '1']    // set version
       ]).flat();
       mainPipeline.exec.mockResolvedValueOnce(mainPipelineResults);
 
-      cachePipeline.exec.mockResolvedValue([]);
+      // Version update pipeline: JSON.SET + JSON.COPY + expire per entity
+      const versionPipelineResults = Array.from({ length: 150 }, () => [
+        [null, 'OK'],  // JSON.SET version
+        [null, 'OK'],  // JSON.COPY
+        [null, 1]      // expire
+      ]).flat();
+      versionPipeline.exec.mockResolvedValue(versionPipelineResults);
+
       mockStreamManager.batchAddToStreams.mockResolvedValue([]);
 
       const result = await ephemeralManager.batchSavePartial(updates);
@@ -326,7 +409,7 @@ describe('EphemeralEntityManager', () => {
       expect(result).toHaveLength(150);
       expect(result.every(r => r.success)).toBe(true);
 
-      // Should be called twice: once for exists check, once for main pipeline
+      // Should be called: exists check, main pipeline
       expect(existsPipeline.exec).toHaveBeenCalledTimes(1);
       expect(mainPipeline.exec).toHaveBeenCalledTimes(1);
     });
@@ -360,13 +443,14 @@ describe('EphemeralEntityManager', () => {
           entityType: 'player',
           entityId: 'user123',
           worldId: 1,
-          attributes: { level: 10, gold: 500 }
+          attributes: { level: 10, gold: 500 },
+          isCreate: true
         }
       ];
 
       const existsPipeline = createMockPipeline();
       const mainPipeline = createMockPipeline();
-      const cachePipeline = createMockPipeline();
+      const versionPipeline = createMockPipeline();
 
       let pipelineCallCount = 0;
       ephemeralManager.redis.pipeline = jest.fn(() => {
@@ -377,13 +461,13 @@ describe('EphemeralEntityManager', () => {
           pipelineCallCount++;
           return mainPipeline;
         } else {
-          return cachePipeline;
+          return versionPipeline;
         }
       });
 
       existsPipeline.exec.mockResolvedValueOnce([[null, null]]);
-      mainPipeline.exec.mockResolvedValueOnce([[null, 'OK'], [null, '1']]);
-      cachePipeline.exec.mockResolvedValueOnce([]);
+      mainPipeline.exec.mockResolvedValueOnce([[null, 1], [null, 'OK'], [null, '1']]);
+      versionPipeline.exec.mockResolvedValueOnce([[null, 'OK'], [null, 'OK'], [null, 1]]);
 
       mockStreamManager.batchAddToStreams.mockResolvedValueOnce([]);
 
@@ -392,13 +476,87 @@ describe('EphemeralEntityManager', () => {
       // Wait for the setImmediate callback to execute
       await new Promise(resolve => setImmediate(resolve));
 
-      // Verify stream manager is called with correct data
+      // Verify stream manager is called with correct data and streamId format
       expect(mockStreamManager.batchAddToStreams).toHaveBeenCalledWith([
         {
-          streamId: 'ephemeral:player:1:user123',
+          streamId: 'entity:player:1:user123',
           data: { level: 10, gold: 500 }
         }
       ]);
+    });
+
+    test('should handle concurrent updates during flush (race condition)', async () => {
+      // Simulate checking version in ephemeral storage - entity has version 5
+      const versionCheckPipeline = createMockPipeline();
+      versionCheckPipeline.exec.mockResolvedValueOnce([[null, '5']]);
+
+      ephemeralManager.redis.pipeline = jest.fn(() => versionCheckPipeline);
+
+      // Try to flush with persisted version 2 (should be skipped because current is 5)
+      await ephemeralManager.flushPersistedEntities([
+        {
+          entityType: 'player',
+          entityId: 'user123',
+          worldId: 1,
+          dirtyKey: 'player:1:user123',
+          persistedVersion: 2
+        }
+      ]);
+
+      // Verify version check pipeline was called
+      expect(versionCheckPipeline.exec).toHaveBeenCalled();
+      expect(versionCheckPipeline.get).toHaveBeenCalledWith('ephemeral:player:1:user123:version');
+
+      // Entity should NOT be deleted because current version (5) > persisted version (2)
+      // Verify srem was NOT called (entity not flushed)
+      expect(ephemeralManager.redis.srem).not.toHaveBeenCalled();
+    });
+
+    test('should flush entity when persisted version matches current version', async () => {
+      // Simulate checking version - entity has version 3
+      const versionCheckPipeline = createMockPipeline();
+      versionCheckPipeline.exec.mockResolvedValueOnce([[null, '3']]);
+
+      // Simulate deletion pipeline with Lua script returning 1 (deleted)
+      const deletionPipeline = createMockPipeline();
+      deletionPipeline.exec.mockResolvedValueOnce([[null, 1]]);
+
+      let pipelineCallCount = 0;
+      ephemeralManager.redis.pipeline = jest.fn(() => {
+        if (pipelineCallCount === 0) {
+          pipelineCallCount++;
+          return versionCheckPipeline;
+        } else {
+          return deletionPipeline;
+        }
+      });
+
+      ephemeralManager.redis.srem = jest.fn().mockResolvedValueOnce(1);
+
+      // Try to flush with persisted version 3 (should succeed)
+      await ephemeralManager.flushPersistedEntities([
+        {
+          entityType: 'player',
+          entityId: 'user456',
+          worldId: 1,
+          dirtyKey: 'player:1:user456',
+          persistedVersion: 3
+        }
+      ]);
+
+      // Verify pipelines were called
+      expect(versionCheckPipeline.exec).toHaveBeenCalled();
+      expect(versionCheckPipeline.get).toHaveBeenCalledWith('ephemeral:player:1:user456:version');
+
+      // Verify deletion pipeline was called and contained eval call
+      expect(deletionPipeline.eval).toHaveBeenCalled();
+      expect(deletionPipeline.exec).toHaveBeenCalled();
+
+      // Verify dirty key was removed
+      expect(ephemeralManager.redis.srem).toHaveBeenCalledWith(
+        'ephemeral:dirty_entities',
+        'player:1:user456'
+      );
     });
 
     test('should handle stream update failures gracefully', async () => {
@@ -407,13 +565,14 @@ describe('EphemeralEntityManager', () => {
           entityType: 'player',
           entityId: 'user123',
           worldId: 1,
-          attributes: { level: 10 }
+          attributes: { level: 10 },
+          isCreate: true
         }
       ];
 
       const existsPipeline = createMockPipeline();
       const mainPipeline = createMockPipeline();
-      const cachePipeline = createMockPipeline();
+      const versionPipeline = createMockPipeline();
 
       let pipelineCallCount = 0;
       ephemeralManager.redis.pipeline = jest.fn(() => {
@@ -424,13 +583,13 @@ describe('EphemeralEntityManager', () => {
           pipelineCallCount++;
           return mainPipeline;
         } else {
-          return cachePipeline;
+          return versionPipeline;
         }
       });
 
       existsPipeline.exec.mockResolvedValueOnce([[null, null]]);
-      mainPipeline.exec.mockResolvedValueOnce([[null, 'OK'], [null, '1']]);
-      cachePipeline.exec.mockResolvedValueOnce([]);
+      mainPipeline.exec.mockResolvedValueOnce([[null, 1], [null, 'OK'], [null, '1']]);
+      versionPipeline.exec.mockResolvedValueOnce([[null, 'OK'], [null, 'OK'], [null, 1]]);
 
       // Mock stream manager failure
       mockStreamManager.batchAddToStreams.mockRejectedValueOnce(new Error('Stream failed'));
@@ -474,9 +633,12 @@ describe('EphemeralEntityManager', () => {
       const pipeline = createMockPipeline();
       ephemeralManager.redis.pipeline = jest.fn(() => pipeline);
 
+      // Combined pipeline: 2 JSON.GET for entities + 2 GET for world instances
       pipeline.exec.mockResolvedValueOnce([
-        [null, JSON.stringify(mockEntity1)],
-        [null, JSON.stringify(mockEntity2)]
+        [null, JSON.stringify(mockEntity1)],  // JSON.GET player
+        [null, JSON.stringify(mockEntity2)],  // JSON.GET session
+        [null, null],                          // GET world instance player
+        [null, null]                           // GET world instance session
       ]);
 
       const result = await ephemeralManager.batchLoad(requests);
@@ -488,6 +650,8 @@ describe('EphemeralEntityManager', () => {
 
       expect(pipeline.call).toHaveBeenCalledWith('JSON.GET', 'ephemeral:player:1:user123');
       expect(pipeline.call).toHaveBeenCalledWith('JSON.GET', 'ephemeral:session:1:sess456');
+      expect(pipeline.get).toHaveBeenCalledWith('stream_world_instance:entity:player:1:user123');
+      expect(pipeline.get).toHaveBeenCalledWith('stream_world_instance:entity:session:1:sess456');
     });
 
     test('should handle non-existent entities', async () => {
@@ -496,8 +660,11 @@ describe('EphemeralEntityManager', () => {
       ];
 
       const pipeline = createMockPipeline();
+      ephemeralManager.redis.pipeline = jest.fn(() => pipeline);
+
       pipeline.exec.mockResolvedValueOnce([
-        [null, null] // Entity doesn't exist
+        [null, null], // Entity doesn't exist
+        [null, null]  // World instance
       ]);
 
       const result = await ephemeralManager.batchLoad(requests);
@@ -523,12 +690,14 @@ describe('EphemeralEntityManager', () => {
 
       pipeline.exec.mockResolvedValueOnce([
         [new Error('Key access failed'), null], // First load fails
-        [null, JSON.stringify(mockEntity)] // Second load succeeds
+        [null, JSON.stringify(mockEntity)],     // Second load succeeds
+        [null, null],                            // World instance for first
+        [null, 'world-instance-1']               // World instance for second
       ]);
 
       const result = await ephemeralManager.batchLoad(requests);
 
-      expect(result).toEqual([null, { ...mockEntity, worldInstanceId: '' }]);
+      expect(result).toEqual([null, { ...mockEntity, worldInstanceId: 'world-instance-1' }]);
     });
 
     test('should handle Redis pipeline failure', async () => {
@@ -538,6 +707,7 @@ describe('EphemeralEntityManager', () => {
 
       const error = new Error('Pipeline execution failed');
       const pipeline = createMockPipeline();
+      ephemeralManager.redis.pipeline = jest.fn(() => pipeline);
       pipeline.exec.mockRejectedValueOnce(error);
 
       const result = await ephemeralManager.batchLoad(requests);
@@ -551,8 +721,11 @@ describe('EphemeralEntityManager', () => {
       ];
 
       const pipeline = createMockPipeline();
+      ephemeralManager.redis.pipeline = jest.fn(() => pipeline);
+
       pipeline.exec.mockResolvedValueOnce([
-        [null, 'invalid json string']
+        [null, 'invalid json string'],
+        [null, null]
       ]);
 
       const result = await ephemeralManager.batchLoad(requests);
@@ -575,16 +748,19 @@ describe('EphemeralEntityManager', () => {
 
       pipeline.exec.mockResolvedValueOnce([
         [null, JSON.stringify(mockEntity1)], // exists
-        [null, null], // doesn't exist
-        [null, JSON.stringify(mockEntity3)] // exists
+        [null, null],                         // doesn't exist
+        [null, JSON.stringify(mockEntity3)], // exists
+        [null, 'world-1'],                   // world instance 1
+        [null, null],                        // world instance 2 (none)
+        [null, 'world-2']                    // world instance 3
       ]);
 
       const result = await ephemeralManager.batchLoad(requests);
 
       expect(result).toEqual([
-        { ...mockEntity1, worldInstanceId: '' },
+        { ...mockEntity1, worldInstanceId: 'world-1' },
         null,
-        { ...mockEntity3, worldInstanceId: '' }
+        { ...mockEntity3, worldInstanceId: 'world-2' }
       ]);
     });
   });

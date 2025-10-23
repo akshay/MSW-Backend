@@ -1,11 +1,11 @@
 // src/streams/StreamManager.js
-import { streamRedis, cacheTTL } from '../config.js';
+import { streamRedis, cacheTTL, config } from '../config.js';
 import { metrics } from './MetricsCollector.js';
 
 export class StreamManager {
   constructor() {
     this.redis = streamRedis;
-    this.worldInstanceTTL = cacheTTL / 100; // 3 seconds
+    this.worldInstanceTTL = config.stream.worldInstanceTTL;
   }
 
   // Get world instance association key

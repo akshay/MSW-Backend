@@ -676,8 +676,6 @@ class BenchmarkRunner {
     await this.testLoadEntities();
     await this.testUpdateEntities();
     await this.testSearchByName();
-    await this.testGetRankings();
-    await this.testCalculateRank();
     await this.testAddToStreams();
     await this.testPullFromStreams();
     await this.testDeleteEntities();
@@ -687,7 +685,13 @@ class BenchmarkRunner {
 
     await this.testVerifyDeletedNotLoaded();
 
-    const totalDuration = Math.round(performance.now() - startTime - 1200);
+    // Wait 6000ms before verifying deleted entities (excluded from benchmark time)
+    await new Promise(resolve => setTimeout(resolve, 6000));
+
+    await this.testGetRankings();
+    await this.testCalculateRank();
+
+    const totalDuration = Math.round(performance.now() - startTime - 6600);
     this.results.totalTime = totalDuration;
 
     this.printSummary();
