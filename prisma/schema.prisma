@@ -9,18 +9,19 @@ datasource db {
 }
 
 model Entity {
-  id         String   @default(uuid()) @db.Text
-  entityType String   @map("entity_type") @db.Text
-  worldId    Int      @map("world_id")
-  attributes Json
-  rankScores Json?    @map("rank_scores") // JSONB key-value map for ranking
-  version    Int      @default(1) // Version number for entity, incremented on each update
-  isDeleted  Boolean  @default(false) @map("is_deleted") // Soft delete flag
-  createdAt  DateTime @default(now()) @map("created_at")
-  updatedAt  DateTime @updatedAt @map("updated_at")
+  id          String   @default(uuid()) @db.Text
+  environment String   @db.Text // Environment (staging/production)
+  entityType  String   @map("entity_type") @db.Text
+  worldId     Int      @map("world_id")
+  attributes  Json
+  rankScores  Json?    @map("rank_scores") // JSONB key-value map for ranking
+  version     Int      @default(1) // Version number for entity, incremented on each update
+  isDeleted   Boolean  @default(false) @map("is_deleted") // Soft delete flag
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
 
-  // Composite primary key for efficient lookups
-  @@id([entityType, id])
+  // Composite primary key for efficient lookups with environment isolation
+  @@id([environment, entityType, id])
 
   // GIN index for name-based JSONB queries within entity type
   @@index([attributes], type: Gin, name: "idx_entity_attributes")
@@ -28,14 +29,14 @@ model Entity {
   // GIN index for rank scores JSONB queries
   @@index([rankScores], type: Gin, name: "idx_entity_rank_scores")
 
-  // Composite index for entity type and world queries
-  @@index([entityType, worldId], name: "idx_entity_type_world")
+  // Composite index for environment, entity type and world queries
+  @@index([environment, entityType, worldId], name: "idx_entity_env_type_world")
 
   // Index for version-based queries
-  @@index([entityType, id, version], name: "idx_entity_version")
+  @@index([environment, entityType, id, version], name: "idx_entity_version")
 
   // Index for filtering deleted entities
-  @@index([entityType, worldId, isDeleted], name: "idx_entity_deleted")
+  @@index([environment, entityType, worldId, isDeleted], name: "idx_entity_deleted")
 
   @@map("entities")
 }

@@ -79,7 +79,7 @@ export class StreamManager {
 
     // Group by stream ID for efficiency
     const streamGroups = streamCommands.reduce((groups, cmd) => {
-      cmd.streamId = `entity:${cmd.entityType}:${cmd.worldId}:${cmd.entityId}`;
+      cmd.streamId = `${cmd.environment}:entity:${cmd.entityType}:${cmd.worldId}:${cmd.entityId}`;
       (groups[cmd.streamId] = groups[cmd.streamId] || []).push(cmd);
       return groups;
     }, {});
@@ -125,7 +125,7 @@ export class StreamManager {
     try {
       // Set stream IDs for all commands
       pullCommands.forEach(cmd => {
-        cmd.streamId = `entity:${cmd.entityType}:${cmd.worldId}:${cmd.entityId}`;
+        cmd.streamId = `${cmd.environment}:entity:${cmd.entityType}:${cmd.worldId}:${cmd.entityId}`;
       });
 
       // Get world instance association keys for MGET

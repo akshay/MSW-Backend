@@ -17,8 +17,8 @@ export class PersistentEntityManager {
 
   // Generate cache key (worldId always included)
   // If version is provided, include it in the cache key
-  getCacheKey(entityType, entityId, worldId, version = null) {
-    return KeyGenerator.getCacheKey(entityType, entityId, worldId, version);
+  getCacheKey(environment, entityType, entityId, worldId, version = null) {
+    return KeyGenerator.getCacheKey(environment, entityType, entityId, worldId, version);
   }
 
   // Compute the difference between two entity versions
@@ -35,9 +35,9 @@ export class PersistentEntityManager {
     const requestIndexMap = new Map();
 
     requests.forEach((request, index) => {
-      const { entityType, entityId, worldId, version = 0 } = request;
-      const newestCacheKey = this.getCacheKey(entityType, entityId, worldId);
-      const versionedCacheKey = version > 0 ? this.getCacheKey(entityType, entityId, worldId, version) : null;
+      const { environment, entityType, entityId, worldId, version = 0 } = request;
+      const newestCacheKey = this.getCacheKey(environment, entityType, entityId, worldId);
+      const versionedCacheKey = version > 0 ? this.getCacheKey(environment, entityType, entityId, worldId, version) : null;
 
       cacheKeys.push(newestCacheKey);
       if (versionedCacheKey) {
@@ -52,13 +52,14 @@ export class PersistentEntityManager {
     });
 
     // Get world instance association keys for MGET
-    const worldInstanceKeys = requests.map(({ entityType, entityId, worldId }) => {
-      const streamId = KeyGenerator.getStreamId(entityType, worldId, entityId);
+    const worldInstanceKeys = requests.map(({ environment, entityType, entityId, worldId }) => {
+      const streamId = KeyGenerator.getStreamId(environment, entityType, worldId, entityId);
       return this.streamManager.getWorldInstanceKey(streamId);
     });
 
     // ALWAYS check ephemeral storage for all requests (cache hits and misses)
-    const ephemeralRequests = requests.map(({ entityType, entityId, worldId, version = 0 }) => ({
+    const ephemeralRequests = requests.map(({ environment, entityType, entityId, worldId, version = 0 }) => ({
+      environment,
       entityType,
       entityId,
       worldId,
@@ -101,7 +102,7 @@ export class PersistentEntityManager {
     if (cacheMisses.length > 0) {
       const missGroups = new Map();
       cacheMisses.forEach(miss => {
-        const groupKey = `${miss.entityType}:${miss.worldId}`;
+        const groupKey = `${miss.environment}:${miss.entityType}:${miss.worldId}`;
         if (!missGroups.has(groupKey)) {
           missGroups.set(groupKey, []);
         }
@@ -110,13 +111,14 @@ export class PersistentEntityManager {
 
       // Query each group in parallel
       const groupQueryPromises = Array.from(missGroups.entries()).map(async ([groupKey, misses]) => {
-        const [entityType, worldIdStr] = groupKey.split(':');
+        const [environment, entityType, worldIdStr] = groupKey.split(':');
         const worldId = parseInt(worldIdStr);
         const entityIds = misses.map(miss => miss.entityId);
 
         try {
           const dbEntities = await this.prisma.entity.findMany({
             where: {
+              environment,
               entityType,
               id: { in: entityIds },
               worldId,
@@ -150,11 +152,11 @@ export class PersistentEntityManager {
 
           if (matchingMiss) {
             // Cache ONLY the DB entity (without ephemeral merge)
-            const newestCacheKey = this.getCacheKey(entity.entityType, entity.id, entity.worldId);
+            const newestCacheKey = this.getCacheKey(entity.environment, entity.entityType, entity.id, entity.worldId);
             allCacheEntries.push([newestCacheKey, entity]);
 
             // Also cache versioned entity
-            const versionedCacheKey = this.getCacheKey(entity.entityType, entity.id, entity.worldId, entity.version);
+            const versionedCacheKey = this.getCacheKey(entity.environment, entity.entityType, entity.id, entity.worldId, entity.version);
             allCacheEntries.push([versionedCacheKey, entity]);
 
             // Store in dbEntityMap
@@ -239,8 +241,9 @@ export class PersistentEntityManager {
       const batch = updateEntries.slice(i, i + this.BATCH_SIZE);
 
       // Prepare batch data for the function with input validation
-      const batchData = batch.map(([, { entityType, entityId, worldId, attributes, rankScores, isCreate, isDelete }]) => {
+      const batchData = batch.map(([, { environment, entityType, entityId, worldId, attributes, rankScores, isCreate, isDelete }]) => {
         const entityData = {
+          environment: environment,
           entity_type: entityType,
           id: entityId,
           world_id: worldId,
@@ -255,7 +258,7 @@ export class PersistentEntityManager {
         }
 
         // Prepare stream update
-        const streamId = KeyGenerator.getStreamId(entityType, worldId, entityId);
+        const streamId = KeyGenerator.getStreamId(environment, entityType, worldId, entityId);
         const streamData = {};
 
         if (isDelete) {
@@ -336,18 +339,19 @@ export class PersistentEntityManager {
       const cacheEntries = [];
 
       batch.forEach(([entityKey, update]) => {
-        const { entityType, entityId, worldId } = update;
+        const { environment, entityType, entityId, worldId } = update;
         const result = resultMap.get(entityKey);
 
         if (result && result.success) {
           // Build cache key to check if entity might be cached
-          const cacheKey = this.getCacheKey(entityType, entityId, worldId);
+          const cacheKey = this.getCacheKey(environment, entityType, entityId, worldId);
 
           // For updates (non-delete), we need to check if entity is in cache
           // If it is, we'll update it; if not, we'll skip caching
           // This defers the read to a batched check after all updates
           cacheEntries.push({
             entityKey,
+            environment,
             entityType,
             entityId,
             worldId,
@@ -365,7 +369,7 @@ export class PersistentEntityManager {
         const finalCacheUpdates = [];
 
         cacheEntries.forEach((entry, index) => {
-          const { entityType, entityId, worldId, update, result } = entry;
+          const { environment, entityType, entityId, worldId, update, result } = entry;
           const cached = cachedEntities.get(keysToCheck[index]);
 
           if (cached) {
@@ -395,8 +399,8 @@ export class PersistentEntityManager {
             updatedEntity.worldId = worldId;
 
             // Cache the updated entity (both newest and versioned)
-            const newestCacheKey = this.getCacheKey(entityType, entityId, worldId);
-            const versionedCacheKey = this.getCacheKey(entityType, entityId, worldId, result.version);
+            const newestCacheKey = this.getCacheKey(environment, entityType, entityId, worldId);
+            const versionedCacheKey = this.getCacheKey(environment, entityType, entityId, worldId, result.version);
 
             finalCacheUpdates.push([newestCacheKey, updatedEntity]);
             finalCacheUpdates.push([versionedCacheKey, updatedEntity]);
@@ -425,15 +429,17 @@ export class PersistentEntityManager {
     if (requests.length === 0) return [];
 
     // Sanitize and build cache keys for all requests
-    const sanitizedRequests = requests.map(({ entityType, worldId, rankKey, sortOrder = 'DESC', limit = 100 }) => {
+    const sanitizedRequests = requests.map(({ environment, entityType, worldId, rankKey, sortOrder = 'DESC', limit = 100 }) => {
+      const sanitizedEnvironment = environment;
       const sanitizedEntityType = InputValidator.sanitizeEntityType(entityType);
       const sanitizedWorldId = InputValidator.sanitizeWorldId(worldId);
       const sanitizedRankKey = InputValidator.sanitizeRankKey(rankKey);
       const sanitizedSortOrder = InputValidator.sanitizeSortOrder(sortOrder);
       const sanitizedLimit = InputValidator.sanitizeLimit(limit);
-      const cacheKey = `rankings:${sanitizedEntityType}:${sanitizedWorldId}:${sanitizedRankKey}:${sanitizedSortOrder}:${sanitizedLimit}`;
+      const cacheKey = `rankings:${sanitizedEnvironment}:${sanitizedEntityType}:${sanitizedWorldId}:${sanitizedRankKey}:${sanitizedSortOrder}:${sanitizedLimit}`;
 
       return {
+        environment: sanitizedEnvironment,
         entityType: sanitizedEntityType,
         worldId: sanitizedWorldId,
         rankKey: sanitizedRankKey,
@@ -467,6 +473,7 @@ export class PersistentEntityManager {
           try {
             const entities = await this.prisma.$queryRaw`
               SELECT * FROM get_ranked_entities(
+                ${miss.environment}::TEXT,
                 ${miss.entityType}::TEXT,
                 ${miss.worldId}::INT,
                 ${miss.rankKey}::TEXT,
@@ -512,14 +519,16 @@ export class PersistentEntityManager {
     if (requests.length === 0) return [];
 
     // Sanitize and build cache keys for all requests
-    const sanitizedRequests = requests.map(({ entityType, worldId, entityId, rankKey }) => {
+    const sanitizedRequests = requests.map(({ environment, entityType, worldId, entityId, rankKey }) => {
+      const sanitizedEnvironment = environment;
       const sanitizedEntityType = InputValidator.sanitizeEntityType(entityType);
       const sanitizedWorldId = InputValidator.sanitizeWorldId(worldId);
       const sanitizedEntityId = InputValidator.sanitizeEntityId(entityId);
       const sanitizedRankKey = InputValidator.sanitizeRankKey(rankKey);
-      const cacheKey = `rank:${sanitizedEntityType}:${sanitizedWorldId}:${sanitizedEntityId}:${sanitizedRankKey}`;
+      const cacheKey = `rank:${sanitizedEnvironment}:${sanitizedEntityType}:${sanitizedWorldId}:${sanitizedEntityId}:${sanitizedRankKey}`;
 
       return {
+        environment: sanitizedEnvironment,
         entityType: sanitizedEntityType,
         worldId: sanitizedWorldId,
         entityId: sanitizedEntityId,
@@ -554,7 +563,8 @@ export class PersistentEntityManager {
               WITH entity_score AS (
                 SELECT (rank_scores->>${miss.rankKey})::FLOAT as score
                 FROM entities
-                WHERE entity_type = ${miss.entityType}
+                WHERE environment = ${miss.environment}
+                  AND entity_type = ${miss.entityType}
                   AND id = ${miss.entityId}
                   AND world_id = ${miss.worldId}
                   AND is_deleted = false
@@ -565,7 +575,8 @@ export class PersistentEntityManager {
                   COUNT(*) FILTER (WHERE (e.rank_scores->>${miss.rankKey})::FLOAT > es.score) + 1 as rank,
                   COUNT(*) as total_entities
                 FROM entities e, entity_score es
-                WHERE e.entity_type = ${miss.entityType}
+                WHERE e.environment = ${miss.environment}
+                  AND e.entity_type = ${miss.entityType}
                   AND e.world_id = ${miss.worldId}
                   AND e.is_deleted = false
                   AND e.rank_scores ? ${miss.rankKey}
@@ -644,17 +655,19 @@ export class PersistentEntityManager {
     if (requests.length === 0) return [];
 
     // Sanitize and build cache keys for all requests
-    const sanitizedRequests = requests.map(({ entityType, namePattern, worldId = null, limit = 100 }) => {
+    const sanitizedRequests = requests.map(({ environment, entityType, namePattern, worldId = null, limit = 100 }) => {
+      const sanitizedEnvironment = environment;
       const sanitizedEntityType = InputValidator.sanitizeEntityType(entityType);
       const sanitizedNamePattern = InputValidator.sanitizeNamePattern(namePattern);
       const sanitizedWorldId = worldId !== null ? InputValidator.sanitizeWorldId(worldId) : null;
       const sanitizedLimit = InputValidator.sanitizeLimit(limit);
 
       const cacheKey = sanitizedWorldId
-        ? `search:${sanitizedEntityType}:${sanitizedWorldId}:${sanitizedNamePattern}:${sanitizedLimit}`
-        : `search:${sanitizedEntityType}:all:${sanitizedNamePattern}:${sanitizedLimit}`;
+        ? `search:${sanitizedEnvironment}:${sanitizedEntityType}:${sanitizedWorldId}:${sanitizedNamePattern}:${sanitizedLimit}`
+        : `search:${sanitizedEnvironment}:${sanitizedEntityType}:all:${sanitizedNamePattern}:${sanitizedLimit}`;
 
       return {
+        environment: sanitizedEnvironment,
         entityType: sanitizedEntityType,
         namePattern: sanitizedNamePattern,
         worldId: sanitizedWorldId,
@@ -687,6 +700,7 @@ export class PersistentEntityManager {
           try {
             const entities = await this.prisma.$queryRaw`
               SELECT * FROM get_entities_by_name(
+                ${miss.environment}::TEXT,
                 ${miss.entityType}::TEXT,
                 ${miss.namePattern}::TEXT,
                 ${miss.worldId}::INT,

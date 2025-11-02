@@ -34,8 +34,8 @@ export class EphemeralEntityManager {
 
   // Ephemeral key includes entityType and worldId
   // If version is provided, include it in the cache key
-  getEphemeralKey(entityType, entityId, worldId, version = null) {
-    return KeyGenerator.getEphemeralKey(entityType, entityId, worldId, version);
+  getEphemeralKey(environment, entityType, entityId, worldId, version = null) {
+    return KeyGenerator.getEphemeralKey(environment, entityType, entityId, worldId, version);
   }
 
   // Compute the difference between two entity versions
@@ -51,8 +51,8 @@ export class EphemeralEntityManager {
       const timestamp = Date.now();
 
       // Check which entities exist (batch operation)
-      const keys = updates.map(({ entityType, entityId, worldId }) =>
-        this.getEphemeralKey(entityType, entityId, worldId)
+      const keys = updates.map(({ environment, entityType, entityId, worldId }) =>
+        this.getEphemeralKey(environment, entityType, entityId, worldId)
       );
 
       const existsPipeline = this.redis.pipeline();
@@ -75,10 +75,10 @@ export class EphemeralEntityManager {
         const dirtyKeys = []; // Track keys to add to dirty set
 
         batch.forEach((update, batchIndex) => {
-          const { entityType, entityId, worldId, attributes, isCreate = false, isDelete = false } = update;
+          const { environment, entityType, entityId, worldId, attributes, isCreate = false, isDelete = false } = update;
           const key = batchKeys[batchIndex];
           const exists = batchExists[batchIndex];
-          const versionKey = KeyGenerator.getVersionKey(entityType, entityId, worldId);
+          const versionKey = KeyGenerator.getVersionKey(environment, entityType, entityId, worldId);
 
           // Validation: Reject updates based on existence and flags
           if (!exists && !isCreate) {
@@ -112,7 +112,7 @@ export class EphemeralEntityManager {
           // Skip ephemeral-only entity types that should not be persisted to DB
           // This MUST happen before the entity update to prevent race conditions
           if (!this.isEphemeralOnly(entityType)) {
-            const dirtyKey = KeyGenerator.getDirtyKey(entityType, entityId, worldId);
+            const dirtyKey = KeyGenerator.getDirtyKey(environment, entityType, entityId, worldId);
             dirtyKeys.push(dirtyKey);
             // Add to dirty set atomically with the update (for both updates and deletes)
             pipeline.sadd(this.DIRTY_SET_KEY, dirtyKey);
@@ -139,7 +139,7 @@ export class EphemeralEntityManager {
 
             // Add deletion to stream
             streamUpdates.push({
-              streamId: KeyGenerator.getStreamId(entityType, worldId, entityId),
+              streamId: KeyGenerator.getStreamId(environment, entityType, worldId, entityId),
               data: { deleted: true }
             });
 
@@ -164,7 +164,7 @@ export class EphemeralEntityManager {
 
           // Prepare stream update data (excluding NULL_MARKER values)
           streamUpdates.push({
-            streamId: KeyGenerator.getStreamId(entityType, worldId, entityId),
+            streamId: KeyGenerator.getStreamId(environment, entityType, worldId, entityId),
             data: streamData
           });
 
@@ -221,14 +221,14 @@ export class EphemeralEntityManager {
           if (!error && result) {
             const versionNum = isCreate ? createVersion : parseInt(result);
             const update = batch[batchIndex];
-            const { entityType, entityId, worldId } = update;
+            const { environment, entityType, entityId, worldId } = update;
             const key = batchKeys[batchIndex];
 
             // Update the version in the entity JSON atomically
             versionUpdatePipeline.call('JSON.SET', key, '$.version', versionNum);
 
             // Cache this version of the entity for future diff calculations with TTL
-            const versionedKey = this.getEphemeralKey(entityType, entityId, worldId, versionNum);
+            const versionedKey = this.getEphemeralKey(environment, entityType, entityId, worldId, versionNum);
             versionUpdatePipeline.call('JSON.COPY', key, versionedKey);
             versionUpdatePipeline.expire(versionedKey, this.VERSION_CACHE_TTL);
 
@@ -272,9 +272,9 @@ export class EphemeralEntityManager {
       const requestMeta = [];
 
       requests.forEach((request) => {
-        const { entityType, entityId, worldId, version = 0 } = request;
-        const newestKey = this.getEphemeralKey(entityType, entityId, worldId);
-        const versionedKey = version > 0 ? this.getEphemeralKey(entityType, entityId, worldId, version) : null;
+        const { environment, entityType, entityId, worldId, version = 0 } = request;
+        const newestKey = this.getEphemeralKey(environment, entityType, entityId, worldId);
+        const versionedKey = version > 0 ? this.getEphemeralKey(environment, entityType, entityId, worldId, version) : null;
 
         newestKeys.push(newestKey);
         versionedKeys.push(versionedKey);
@@ -301,9 +301,9 @@ export class EphemeralEntityManager {
       });
 
       // Get world instance association keys
-      const worldInstanceKeys = requests.map(({ entityType, entityId, worldId }) => {
+      const worldInstanceKeys = requests.map(({ environment, entityType, entityId, worldId }) => {
         return this.streamManager.getWorldInstanceKey(
-          KeyGenerator.getStreamId(entityType, worldId, entityId)
+          KeyGenerator.getStreamId(environment, entityType, worldId, entityId)
         );
       });
 
@@ -386,6 +386,7 @@ export class EphemeralEntityManager {
       const requests = keysArray.map(key => {
         const parsed = KeyGenerator.parseDirtyKey(key);
         return {
+          environment: parsed.environment,
           entityType: parsed.entityType,
           entityId: parsed.entityId,
           worldId: parsed.worldId,
@@ -403,6 +404,7 @@ export class EphemeralEntityManager {
 
           const request = requests[index];
           return {
+            environment: request.environment,
             entityType: request.entityType,
             entityId: request.entityId,
             worldId: request.worldId,
@@ -465,8 +467,8 @@ export class EphemeralEntityManager {
       // First, check current versions in ephemeral storage to avoid race conditions
       const versionCheckPipeline = this.redis.pipeline();
 
-      entityKeys.forEach(({ entityType, entityId, worldId }) => {
-        const versionKey = KeyGenerator.getVersionKey(entityType, entityId, worldId);
+      entityKeys.forEach(({ environment, entityType, entityId, worldId }) => {
+        const versionKey = KeyGenerator.getVersionKey(environment, entityType, entityId, worldId);
         versionCheckPipeline.get(versionKey);
       });
 
@@ -496,15 +498,15 @@ export class EphemeralEntityManager {
       const dirtyKeysToRemove = [];
       const safeToDeleteIndices = [];
 
-      entityKeys.forEach(({ entityType, entityId, worldId, dirtyKey, persistedVersion }, index) => {
+      entityKeys.forEach(({ environment, entityType, entityId, worldId, dirtyKey, persistedVersion }, index) => {
         const [, currentVersionStr] = versionResults[index];
         const currentVersion = currentVersionStr ? parseInt(currentVersionStr) : null;
         const persisted = persistedVersion || 0;
 
         // Check if safe to delete
         if (!currentVersion || !persisted || currentVersion <= persisted) {
-          const key = this.getEphemeralKey(entityType, entityId, worldId);
-          const versionKey = KeyGenerator.getVersionKey(entityType, entityId, worldId);
+          const key = this.getEphemeralKey(environment, entityType, entityId, worldId);
+          const versionKey = KeyGenerator.getVersionKey(environment, entityType, entityId, worldId);
 
           // Use Lua script for atomic conditional deletion
           deletionPipeline.eval(luaScript, 2, key, versionKey, persisted);
@@ -515,7 +517,7 @@ export class EphemeralEntityManager {
           if (dirtyKey) {
             dirtyKeysToRemove.push(dirtyKey);
           } else {
-            dirtyKeysToRemove.push(KeyGenerator.getDirtyKey(entityType, entityId, worldId));
+            dirtyKeysToRemove.push(KeyGenerator.getDirtyKey(environment, entityType, entityId, worldId));
           }
         } else {
           // Entity was updated after persistence, don't delete

@@ -220,10 +220,11 @@ export class BackgroundPersistenceTask {
         const result = allResults.get(key);
         return result && result.success;
       })
-      .map(({ entityType, entityId, worldId, dirtyKey }) => {
+      .map(({ environment, entityType, entityId, worldId, dirtyKey }) => {
         const key = `${entityType}:${entityId}:${worldId}`;
         const result = allResults.get(key);
         return {
+          environment,
           entityType,
           entityId,
           worldId,
@@ -253,9 +254,10 @@ export class BackgroundPersistenceTask {
   convertToMergedUpdates(pendingUpdates) {
     const mergedUpdates = new Map();
 
-    pendingUpdates.forEach(({ entityType, entityId, worldId, attributes, rankScores, isCreate, isDelete }) => {
+    pendingUpdates.forEach(({ environment, entityType, entityId, worldId, attributes, rankScores, isCreate, isDelete }) => {
       const key = `${entityType}:${entityId}:${worldId}`;
       const existing = mergedUpdates.get(key) || {
+        environment,
         entityType,
         entityId,
         worldId,

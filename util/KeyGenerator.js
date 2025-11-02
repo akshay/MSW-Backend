@@ -6,64 +6,69 @@
 export class KeyGenerator {
   /**
    * Generate key for persistent cache storage
+   * @param {string} environment - The environment (staging/production)
    * @param {string} entityType
    * @param {string} entityId
    * @param {number} worldId
    * @param {number|null} version - Optional version number
    * @returns {string}
    */
-  static getCacheKey(entityType, entityId, worldId, version = null) {
+  static getCacheKey(environment, entityType, entityId, worldId, version = null) {
     if (version !== null) {
-      return `entity:${entityType}:${worldId}:${entityId}:v${version}`;
+      return `${environment}:entity:${entityType}:${worldId}:${entityId}:v${version}`;
     }
-    return `entity:${entityType}:${worldId}:${entityId}`;
+    return `${environment}:entity:${entityType}:${worldId}:${entityId}`;
   }
 
   /**
    * Generate key for ephemeral Redis storage
+   * @param {string} environment - The environment (staging/production)
    * @param {string} entityType
    * @param {string} entityId
    * @param {number} worldId
    * @param {number|null} version - Optional version number
    * @returns {string}
    */
-  static getEphemeralKey(entityType, entityId, worldId, version = null) {
+  static getEphemeralKey(environment, entityType, entityId, worldId, version = null) {
     if (version !== null) {
-      return `ephemeral:${entityType}:${worldId}:${entityId}:v${version}`;
+      return `${environment}:ephemeral:${entityType}:${worldId}:${entityId}:v${version}`;
     }
-    return `ephemeral:${entityType}:${worldId}:${entityId}`;
+    return `${environment}:ephemeral:${entityType}:${worldId}:${entityId}`;
   }
 
   /**
    * Generate version counter key for ephemeral storage
+   * @param {string} environment - The environment (staging/production)
    * @param {string} entityType
    * @param {string} entityId
    * @param {number} worldId
    * @returns {string}
    */
-  static getVersionKey(entityType, entityId, worldId) {
-    return `${this.getEphemeralKey(entityType, entityId, worldId)}:version`;
+  static getVersionKey(environment, entityType, entityId, worldId) {
+    return `${this.getEphemeralKey(environment, entityType, entityId, worldId)}:version`;
   }
 
   /**
    * Generate dirty set member key (used for tracking entities needing persistence)
+   * @param {string} environment - The environment (staging/production)
    * @param {string} entityType
    * @param {string} entityId
    * @param {number} worldId
    * @returns {string}
    */
-  static getDirtyKey(entityType, entityId, worldId) {
-    return `${entityType}:${worldId}:${entityId}`;
+  static getDirtyKey(environment, entityType, entityId, worldId) {
+    return `${environment}:${entityType}:${worldId}:${entityId}`;
   }
 
   /**
    * Parse a dirty key back into components
    * @param {string} dirtyKey
-   * @returns {{entityType: string, worldId: number, entityId: string}}
+   * @returns {{environment: string, entityType: string, worldId: number, entityId: string}}
    */
   static parseDirtyKey(dirtyKey) {
-    const [entityType, worldIdStr, entityId] = dirtyKey.split(':');
+    const [environment, entityType, worldIdStr, entityId] = dirtyKey.split(':');
     return {
+      environment,
       entityType,
       entityId,
       worldId: parseInt(worldIdStr)
@@ -72,12 +77,13 @@ export class KeyGenerator {
 
   /**
    * Generate stream ID for entity
+   * @param {string} environment - The environment (staging/production)
    * @param {string} entityType
    * @param {number} worldId
    * @param {string} entityId
    * @returns {string}
    */
-  static getStreamId(entityType, worldId, entityId) {
-    return `entity:${entityType}:${worldId}:${entityId}`;
+  static getStreamId(environment, entityType, worldId, entityId) {
+    return `${environment}:entity:${entityType}:${worldId}:${entityId}`;
   }
 }

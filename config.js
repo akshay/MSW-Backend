@@ -53,6 +53,9 @@ export const config = {
   port: process.env.PORT || 3000,
   nodeEnv: process.env.NODE_ENV || 'development',
 
+  // Environment whitelist - only these environments are allowed
+  allowedEnvironments: ['staging', 'production'],
+
   // Entity type configuration
   entityTypes: {
     persistent: ['Account', 'Guild', 'Alliance', 'Party', 'PlayerCharacter'],

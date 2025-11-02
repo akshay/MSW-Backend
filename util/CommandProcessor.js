@@ -102,10 +102,21 @@ export class CommandProcessor {
       // Validate and decrypt the request
       await this.validateAndDecryptRequest(payload);
 
-      const { commands } = payload;
+      // Validate environment
+      const { environment, commands } = payload;
+      if (!environment || !config.allowedEnvironments.includes(environment)) {
+        return {
+          error: `Invalid environment: must be one of ${config.allowedEnvironments.join(', ')}`,
+          provided: environment
+        };
+      }
+
       if (!commands || typeof commands !== 'object' || Array.isArray(commands)) {
         return { error: 'Invalid request: commands array required' };
       }
+
+      // Store environment for use in command processing
+      this.currentEnvironment = environment;
 
       // Group commands by type for optimal batching
       this.groupCommandsByType(commands, payload.worldInstanceId);
@@ -319,6 +330,7 @@ export class CommandProcessor {
     if (commands.length === 0) return [];
 
     const loadRequests = commands.map(cmd => ({
+      environment: this.currentEnvironment,
       entityType: cmd.entityType,
       entityId: cmd.entityId,
       worldId: cmd.worldId
@@ -337,6 +349,7 @@ export class CommandProcessor {
     if (commands.length === 0) return [];
 
     const loadRequests = commands.map(cmd => ({
+      environment: this.currentEnvironment,
       entityType: cmd.entityType,
       entityId: cmd.entityId,
       worldId: cmd.worldId
@@ -379,6 +392,7 @@ export class CommandProcessor {
     if (commands.length === 0) return [];
 
     const updates = commands.map(cmd => ({
+      environment: this.currentEnvironment,
       entityType: cmd.entityType,
       entityId: cmd.entityId,
       worldId: cmd.worldId,
@@ -412,6 +426,7 @@ export class CommandProcessor {
       });
 
       return {
+        environment: this.currentEnvironment,
         entityType: cmd.entityType,
         entityId: cmd.entityId,
         worldId: cmd.worldId,
@@ -435,7 +450,13 @@ export class CommandProcessor {
   async processBatchedStreamAdds(streamAddCommands) {
     if (streamAddCommands.length === 0) return [];
 
-    const results = await this.streamManager.batchAddMessages(streamAddCommands);
+    // Add environment to commands
+    const commandsWithEnv = streamAddCommands.map(cmd => ({
+      ...cmd,
+      environment: this.currentEnvironment
+    }));
+
+    const results = await this.streamManager.batchAddMessages(commandsWithEnv);
 
     return streamAddCommands.map((cmd, index) => ({
       originalIndex: cmd.originalIndex,
@@ -447,7 +468,13 @@ export class CommandProcessor {
   async processBatchedStreamPulls(streamPullCommands) {
     if (streamPullCommands.length === 0) return [];
 
-    const results = await this.streamManager.batchPullMessages(streamPullCommands);
+    // Add environment to commands
+    const commandsWithEnv = streamPullCommands.map(cmd => ({
+      ...cmd,
+      environment: this.currentEnvironment
+    }));
+
+    const results = await this.streamManager.batchPullMessages(commandsWithEnv);
 
     return streamPullCommands.map((cmd, index) => ({
       originalIndex: cmd.originalIndex,
@@ -461,6 +488,7 @@ export class CommandProcessor {
 
     // Use batch method for efficient cache operations
     const requests = searchCommands.map(cmd => ({
+      environment: this.currentEnvironment,
       entityType: cmd.entityType,
       namePattern: cmd.namePattern,
       worldId: cmd.worldId,
@@ -481,6 +509,7 @@ export class CommandProcessor {
 
     // Use batch method for efficient cache operations
     const requests = calculateRankCommands.map(cmd => ({
+      environment: this.currentEnvironment,
       entityType: cmd.entityType,
       worldId: cmd.worldId,
       entityId: cmd.entityId,
@@ -501,6 +530,7 @@ export class CommandProcessor {
 
     // Use batch method for efficient cache operations
     const requests = getRankingsCommands.map(cmd => ({
+      environment: this.currentEnvironment,
       entityType: cmd.entityType,
       worldId: cmd.worldId,
       rankKey: cmd.rankKey,
