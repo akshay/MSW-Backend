@@ -92,5 +92,15 @@ export const config = {
     defaultTTL: parseInt(process.env.LOCK_DEFAULT_TTL_SECONDS) || 10, // Default: 10 seconds
     retryDelayMs: parseInt(process.env.LOCK_RETRY_DELAY_MS) || 100, // Default: 100ms
     maxRetries: parseInt(process.env.LOCK_MAX_RETRIES) || 3 // Default: 3
+  },
+
+  // Backblaze B2 Configuration
+  backblaze: {
+    keyId: process.env.BACKBLAZE_KEY_ID,
+    key: process.env.BACKBLAZE_KEY,
+    stagingBucket: process.env.BACKBLAZE_STAGING_BUCKET,
+    productionBucket: process.env.BACKBLAZE_PRODUCTION_BUCKET,
+    syncIntervalMs: parseInt(process.env.FILE_SYNC_INTERVAL_MS) || 60000, // Default: 60 seconds
+    enabled: process.env.FILE_SYNC_ENABLED === 'true' || false
   }
 };

@@ -7,6 +7,7 @@ import { StreamManager } from './StreamManager.js';
 import { EphemeralEntityManager } from './EphemeralEntityManager.js';
 import { PersistentEntityManager } from './PersistentEntityManager.js';
 import { BackgroundPersistenceTask } from './BackgroundPersistenceTask.js';
+import { BackblazeFileManager } from './BackblazeFileManager.js';
 import { metrics } from './MetricsCollector.js';
 
 // Simple ASCII encode/decode functions for authentication
@@ -41,6 +42,12 @@ export class CommandProcessor {
       }
     );
 
+    // Initialize Backblaze file manager if enabled
+    this.fileManager = null;
+    if (config.backblaze.enabled && config.backblaze.keyId && config.backblaze.key) {
+      this.fileManager = new BackblazeFileManager(config.backblaze);
+    }
+
     // Precompute decryption key from environment variables
     this.initializeDecryption();
 
@@ -48,15 +55,30 @@ export class CommandProcessor {
     this.startBackgroundTasks();
   }
 
-  startBackgroundTasks() {
+  async startBackgroundTasks() {
     console.log('Starting background tasks...');
     this.backgroundTask.start();
+
+    // Initialize file manager if enabled
+    if (this.fileManager) {
+      try {
+        await this.fileManager.initialize();
+        console.log('Backblaze file manager initialized successfully');
+      } catch (error) {
+        console.error('Failed to initialize Backblaze file manager:', error);
+        // Don't throw - file sync is optional
+      }
+    }
   }
 
-  stopBackgroundTasks() {
+  async stopBackgroundTasks() {
     console.log('Stopping background tasks...');
     if (this.backgroundTask) {
       this.backgroundTask.stop();
+    }
+
+    if (this.fileManager) {
+      await this.fileManager.shutdown();
     }
   }
 
@@ -158,7 +180,26 @@ export class CommandProcessor {
         }
       });
 
-      return orderedResults;
+      // Handle file sync if files parameter is present
+      const response = { ...orderedResults };
+
+      if (this.fileManager && payload.files) {
+        const fileSyncData = await this.processFileSync(
+          environment,
+          payload.files,
+          payload.downloads
+        );
+
+        if (fileSyncData.fileMismatches) {
+          response.fileMismatches = fileSyncData.fileMismatches;
+        }
+
+        if (fileSyncData.fileDownloads) {
+          response.fileDownloads = fileSyncData.fileDownloads;
+        }
+      }
+
+      return response;
     } catch (error) {
       console.error('Command processing failed:', error);
 
@@ -615,5 +656,127 @@ export class CommandProcessor {
 
   isEphemeralEntityType(entityType) {
     return config.entityTypes.ephemeral.includes(entityType);
+  }
+
+  /**
+   * Process file sync operations
+   * - Validates file hashes
+   * - Returns file mismatches
+   * - Handles progressive file downloads with offset support
+   * - Respects 10MB response limit
+   */
+  async processFileSync(environment, fileHashes, downloads) {
+    const MAX_RESPONSE_SIZE = 10 * 1024 * 1024; // 10MB in bytes
+    const BANDWIDTH_ALLOCATION = 0.9; // Use 90% of available bandwidth
+
+    const result = {
+      fileMismatches: null,
+      fileDownloads: null,
+    };
+
+    try {
+      // Step 1: Validate file hashes and identify mismatches
+      const mismatches = this.fileManager.validateFileHashes(environment, fileHashes);
+
+      if (Object.keys(mismatches).length > 0) {
+        result.fileMismatches = mismatches;
+        metrics.recordMetric('file_sync.mismatches', Object.keys(mismatches).length);
+      }
+
+      // Step 2: Process downloads if requested
+      if (downloads && Object.keys(downloads).length > 0) {
+        const downloadResults = {};
+        let remainingBandwidth = MAX_RESPONSE_SIZE * BANDWIDTH_ALLOCATION;
+
+        // Sort downloads to process them in a consistent order
+        const downloadEntries = Object.entries(downloads).sort(([a], [b]) => a.localeCompare(b));
+
+        for (const [fileName, downloadInfo] of downloadEntries) {
+          if (remainingBandwidth <= 0) {
+            // No more bandwidth available
+            break;
+          }
+
+          // Validate that the hash matches the current file version
+          const cachedFile = this.fileManager.getFile(environment, fileName);
+
+          if (!cachedFile) {
+            // File not found
+            downloadResults[fileName] = {
+              error: 'File not found',
+            };
+            continue;
+          }
+
+          if (downloadInfo.hash !== cachedFile.hash) {
+            // Hash mismatch - client is requesting wrong version
+            downloadResults[fileName] = {
+              error: 'Hash mismatch',
+              expectedHash: cachedFile.hash,
+              fileSize: cachedFile.fileSize,
+            };
+            continue;
+          }
+
+          // Get the current offset (how many bytes already downloaded)
+          const offset = downloadInfo.bytesReceived || 0;
+
+          // Get file chunk with bandwidth limit
+          const chunkData = this.fileManager.getFileChunk(
+            environment,
+            fileName,
+            offset,
+            Math.floor(remainingBandwidth)
+          );
+
+          if (!chunkData) {
+            downloadResults[fileName] = {
+              error: 'Failed to read file',
+            };
+            continue;
+          }
+
+          // Convert buffer to base64 for JSON transport
+          const chunkBase64 = chunkData.chunk.toString('base64');
+
+          downloadResults[fileName] = {
+            hash: chunkData.hash,
+            fileSize: chunkData.fileSize,
+            offset: chunkData.offset,
+            bytesInChunk: chunkData.bytesToSend,
+            remainingBytes: chunkData.remainingBytes,
+            chunk: chunkBase64,
+            complete: chunkData.remainingBytes === 0,
+          };
+
+          // Update remaining bandwidth
+          remainingBandwidth -= chunkData.bytesToSend;
+
+          // Record metrics
+          metrics.recordMetric('file_sync.bytes_sent', chunkData.bytesToSend);
+        }
+
+        if (Object.keys(downloadResults).length > 0) {
+          result.fileDownloads = downloadResults;
+        }
+      }
+
+      return result;
+    } catch (error) {
+      console.error('[CommandProcessor] Error processing file sync:', error);
+      metrics.recordError('file_sync', error);
+      return {
+        fileMismatches: null,
+        fileDownloads: null,
+        error: 'File sync error',
+      };
+    }
+  }
+
+  /**
+   * Get file manager stats
+   */
+  getFileSyncStats() {
+    return this.fileManager ? this.fileManager.getStats() : null;
   }
 }

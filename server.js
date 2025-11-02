@@ -15,7 +15,6 @@ const commandProcessor = new CommandProcessor();
 app.use(helmet());
 app.use(cors());
 app.use(express.json({ limit: '10mb' }));
-app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
 // Rate limiting middleware - must be after body parsers
 app.use(rateLimiter.middleware());
@@ -24,11 +23,19 @@ app.use(rateLimiter.middleware());
 // src/server.js - Updated health check
 app.get('/health', async (req, res) => {
   try {
-    const [cacheHealth, ephemeralHealth, streamHealth] = await Promise.all([
+    const healthChecks = [
       commandProcessor.cache.healthCheck(),
       checkRedisHealth(ephemeralRedis, 'ephemeral'),
       checkRedisHealth(streamRedis, 'streams')
-    ]);
+    ];
+
+    // Add file sync health check if enabled
+    if (commandProcessor.fileManager) {
+      healthChecks.push(commandProcessor.fileManager.healthCheck());
+    }
+
+    const healthResults = await Promise.all(healthChecks);
+    const [cacheHealth, ephemeralHealth, streamHealth, fileSyncHealth] = healthResults;
 
     const backgroundTaskStats = commandProcessor.getBackgroundTaskStats();
 
@@ -45,7 +52,12 @@ app.get('/health', async (req, res) => {
       backgroundTask: backgroundTaskStats
     };
 
-    const allHealthy = [cacheHealth, ephemeralHealth, streamHealth]
+    // Add file sync health if available
+    if (fileSyncHealth) {
+      overallHealth.services.fileSync = fileSyncHealth;
+    }
+
+    const allHealthy = healthResults
       .every(service => service.status === 'healthy');
 
     res.status(allHealthy ? 200 : 503).json(overallHealth);
@@ -107,6 +119,24 @@ app.get('/stats/background-task', (req, res) => {
   } catch (error) {
     res.status(500).json({
       error: 'Failed to get background task stats',
+      message: error.message
+    });
+  }
+});
+
+// File sync stats endpoint
+app.get('/stats/file-sync', (req, res) => {
+  try {
+    const stats = commandProcessor.getFileSyncStats();
+    if (!stats) {
+      return res.status(404).json({
+        error: 'File sync is not enabled or configured'
+      });
+    }
+    res.json(stats);
+  } catch (error) {
+    res.status(500).json({
+      error: 'Failed to get file sync stats',
       message: error.message
     });
   }
@@ -473,8 +503,8 @@ app.use((req, res) => {
 process.on('SIGTERM', async () => {
   console.log('SIGTERM received, shutting down gracefully');
 
-  // Stop background tasks first
-  commandProcessor.stopBackgroundTasks();
+  // Stop background tasks first (includes file sync)
+  await commandProcessor.stopBackgroundTasks();
 
   // Close database connections
   await commandProcessor.persistentManager.prisma.$disconnect();
@@ -490,8 +520,8 @@ process.on('SIGTERM', async () => {
 process.on('SIGINT', async () => {
   console.log('SIGINT received, shutting down gracefully');
 
-  // Stop background tasks first
-  commandProcessor.stopBackgroundTasks();
+  // Stop background tasks first (includes file sync)
+  await commandProcessor.stopBackgroundTasks();
 
   // Close database connections
   await commandProcessor.persistentManager.prisma.$disconnect();
