@@ -158,7 +158,7 @@ class BenchmarkRunner {
             name: `${entityType}_${i}`,
             level: Math.floor(Math.random() * 100) + 1,
             created_at: Date.now(),
-            rank_score: Math.random() * 10000
+            rankScore: Math.random() * 10000
           },
           isCreate: true
         });
@@ -254,7 +254,7 @@ class BenchmarkRunner {
           attributes: {
             level: Math.floor(Math.random() * 100) + 100,
             updated_at: Date.now(),
-            rank_score: Math.random() * 10000
+            rankScore: Math.random() * 10000
           }
           // No isCreate or isDelete = update
         });
@@ -339,7 +339,7 @@ class BenchmarkRunner {
       commands.top.push({
         entityType,
         worldId: BENCHMARK_CONFIG.worldId,
-        rankKey: 'rank_score',
+        rankKey: 'rankScore',
         sortOrder: 'DESC',
         limit: 100
       });
@@ -384,7 +384,7 @@ class BenchmarkRunner {
           entityType,
           entityId: entities[i],
           worldId: BENCHMARK_CONFIG.worldId,
-          rankKey: 'rank_score'
+          rankKey: 'rankScore'
         });
       }
     }

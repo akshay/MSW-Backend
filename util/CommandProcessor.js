@@ -460,7 +460,7 @@ export class CommandProcessor {
 
       // Look for rank score patterns and extract them
       Object.keys(attributes).forEach(key => {
-        if (key.startsWith('rank_') || key.endsWith('_score') || key.endsWith('_rank')) {
+        if (key.startsWith('rank') || key.startsWith('score') || key.endsWith('Score') || key.endsWith('Rank')) {
           rankScores[key] = attributes[key];
           delete attributes[key];
         }
