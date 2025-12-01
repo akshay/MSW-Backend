@@ -515,6 +515,7 @@ export class PersistentEntityManager {
   }
 
   // Batch calculate entity ranks with batched cache operations
+  // rankKey format: "scoreType:partitionKey" (e.g., "kills:1", "score:2")
   async batchCalculateEntityRank(requests) {
     if (requests.length === 0) return [];
 
@@ -525,6 +526,13 @@ export class PersistentEntityManager {
       const sanitizedWorldId = InputValidator.sanitizeWorldId(worldId);
       const sanitizedEntityId = InputValidator.sanitizeEntityId(entityId);
       const sanitizedRankKey = InputValidator.sanitizeRankKey(rankKey);
+
+      // Parse rankKey to extract scoreType and partitionKey
+      const [scoreType, partitionKey] = sanitizedRankKey.split(':');
+      if (!scoreType || !partitionKey) {
+        throw new Error(`Invalid rankKey format. Expected "scoreType:partitionKey", got "${sanitizedRankKey}"`);
+      }
+
       const cacheKey = `rank:${sanitizedEnvironment}:${sanitizedEntityType}:${sanitizedWorldId}:${sanitizedEntityId}:${sanitizedRankKey}`;
 
       return {
@@ -533,6 +541,8 @@ export class PersistentEntityManager {
         worldId: sanitizedWorldId,
         entityId: sanitizedEntityId,
         rankKey: sanitizedRankKey,
+        scoreType,
+        partitionKey,
         cacheKey
       };
     });
@@ -559,27 +569,31 @@ export class PersistentEntityManager {
       const dbResults = await Promise.all(
         cacheMisses.map(async (miss) => {
           try {
+            // rankKey format: "scoreType:partitionKey"
+            // Access nested structure: rank_scores->scoreType->>partitionKey
             const result = await this.prisma.$queryRaw`
               WITH entity_score AS (
-                SELECT (rank_scores->>${miss.rankKey})::FLOAT as score
+                SELECT (rank_scores->${miss.scoreType}->>${miss.partitionKey})::BIGINT as score
                 FROM entities
                 WHERE environment = ${miss.environment}
                   AND entity_type = ${miss.entityType}
                   AND id = ${miss.entityId}
                   AND world_id = ${miss.worldId}
                   AND is_deleted = false
-                  AND rank_scores ? ${miss.rankKey}
+                  AND rank_scores ? ${miss.scoreType}
+                  AND rank_scores->${miss.scoreType} ? ${miss.partitionKey}
               ),
               rank_calculation AS (
                 SELECT
-                  COUNT(*) FILTER (WHERE (e.rank_scores->>${miss.rankKey})::FLOAT > es.score) + 1 as rank,
+                  COUNT(*) FILTER (WHERE (e.rank_scores->${miss.scoreType}->>${miss.partitionKey})::BIGINT > es.score) + 1 as rank,
                   COUNT(*) as total_entities
                 FROM entities e, entity_score es
                 WHERE e.environment = ${miss.environment}
                   AND e.entity_type = ${miss.entityType}
                   AND e.world_id = ${miss.worldId}
                   AND e.is_deleted = false
-                  AND e.rank_scores ? ${miss.rankKey}
+                  AND e.rank_scores ? ${miss.scoreType}
+                  AND e.rank_scores->${miss.scoreType} ? ${miss.partitionKey}
               )
               SELECT
                 es.score,
@@ -609,7 +623,7 @@ export class PersistentEntityManager {
               entityType: miss.entityType,
               worldId: miss.worldId,
               rankKey: miss.rankKey,
-              score: parseFloat(score),
+              score: score !== null ? parseInt(score) : null,
               rank: parseInt(rank),
               totalEntities: parseInt(total_entities)
             };

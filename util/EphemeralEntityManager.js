@@ -75,7 +75,7 @@ export class EphemeralEntityManager {
         const dirtyKeys = []; // Track keys to add to dirty set
 
         batch.forEach((update, batchIndex) => {
-          const { environment, entityType, entityId, worldId, attributes, isCreate = false, isDelete = false } = update;
+          const { environment, entityType, entityId, worldId, attributes, rankScores, isCreate = false, isDelete = false } = update;
           const key = batchKeys[batchIndex];
           const exists = batchExists[batchIndex];
           const versionKey = KeyGenerator.getVersionKey(environment, entityType, entityId, worldId);
@@ -149,9 +149,12 @@ export class EphemeralEntityManager {
           // Separate attributes into updates and removals
           const attributesToSet = {};
           const attributesToRemove = [];
+          const rankScoresToSet = {};
+          const rankScoresToRemove = [];
           const streamData = {};
 
-          Object.entries(attributes).forEach(([field, value]) => {
+          // Process attributes
+          Object.entries(attributes || {}).forEach(([field, value]) => {
             if (InputValidator.isNullMarker(value)) {
               // Mark for removal
               attributesToRemove.push(field);
@@ -161,6 +164,23 @@ export class EphemeralEntityManager {
               streamData[field] = value;
             }
           });
+
+          // Process rankScores (nested map structure)
+          if (rankScores) {
+            Object.entries(rankScores).forEach(([scoreType, partitionMap]) => {
+              if (InputValidator.isNullMarker(partitionMap)) {
+                // Remove entire score type
+                rankScoresToRemove.push(scoreType);
+              } else if (typeof partitionMap === 'object' && partitionMap !== null) {
+                // Process partition map
+                rankScoresToSet[scoreType] = partitionMap;
+                // Add to stream data with flattened format "scoreType:partitionKey"
+                Object.entries(partitionMap).forEach(([partitionKey, value]) => {
+                  streamData[`${scoreType}:${partitionKey}`] = value;
+                });
+              }
+            });
+          }
 
           // Prepare stream update data (excluding NULL_MARKER values)
           streamUpdates.push({
@@ -175,6 +195,7 @@ export class EphemeralEntityManager {
               entityType,
               worldId,
               attributes: attributesToSet,
+              rankScores: rankScoresToSet,
               lastWrite: timestamp,
               version: 1,
               type: 'ephemeral'
@@ -196,6 +217,19 @@ export class EphemeralEntityManager {
             // Remove attributes marked with NULL_MARKER
             attributesToRemove.forEach(field => {
               pipeline.call('JSON.DEL', key, `$.attributes.${field}`);
+            });
+
+            // Set new/updated rankScores (nested map structure)
+            // For each scoreType, deep merge the partition map
+            Object.entries(rankScoresToSet).forEach(([scoreType, partitionMap]) => {
+              Object.entries(partitionMap).forEach(([partitionKey, value]) => {
+                pipeline.call('JSON.SET', key, `$.rankScores.${scoreType}.${partitionKey}`, JSON.stringify(value));
+              });
+            });
+
+            // Remove rankScores marked for deletion
+            rankScoresToRemove.forEach(scoreType => {
+              pipeline.call('JSON.DEL', key, `$.rankScores.${scoreType}`);
             });
 
             // Update worldId and timestamp

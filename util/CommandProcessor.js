@@ -455,12 +455,15 @@ export class CommandProcessor {
 
     const updates = commands.map(cmd => {
       // Extract rank scores from attributes if present
+      // rankScores now uses map<int32, int64> structure: { "scoreType": { "partitionKey": value } }
       const rankScores = {};
       const attributes = { ...cmd.attributes };
 
       // Look for rank score patterns and extract them
+      // Expected format in attributes: "scoreType:partitionKey" -> value
+      // We'll convert this to nested structure: rankScores[scoreType][partitionKey] = value
       Object.keys(attributes).forEach(key => {
-        if (key.startsWith('rank') || key.startsWith('score') || key.endsWith('Score') || key.endsWith('Rank')) {
+        if (key.endsWith('Score')) {
           rankScores[key] = attributes[key];
           delete attributes[key];
         }
