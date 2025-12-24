@@ -203,7 +203,6 @@ export class StreamManager {
           success: true,
           worldInstanceId: associatedWorldInstance,
           data: (messages || []).map(([id, fields]) => ({
-            id,
             data: JSON.parse(fields[1]),
             timestamp: parseInt(fields[3])
           }))

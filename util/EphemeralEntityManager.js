@@ -282,9 +282,6 @@ export class EphemeralEntityManager {
         }
       }
 
-      // Batch add to streams (fire-and-forget for performance)
-      StreamUpdateUtil.scheduleStreamUpdates(this.streamManager, streamUpdates);
-
       return results;
 
     } catch (error) {

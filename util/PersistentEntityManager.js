@@ -417,9 +417,6 @@ export class PersistentEntityManager {
       }
     }
 
-    // Batch add to streams (fire-and-forget for performance)
-    StreamUpdateUtil.scheduleStreamUpdates(this.streamManager, streamUpdates);
-
     console.log(`Atomic batch upsert completed: ${mergedUpdates.size} entities`);
     return resultMap;
   }
