@@ -93,7 +93,7 @@ export class StreamManager {
             `stream:${streamId}`,
             '*',
             'data', JSON.stringify(cmd.message),
-            'timestamp', Date.now()
+            'timestamp', cmd.timestamp || Date.now()
           );
         });
 

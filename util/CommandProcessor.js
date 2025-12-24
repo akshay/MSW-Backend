@@ -614,40 +614,32 @@ export class CommandProcessor {
 
     const results = [];
 
-    for (const cmd of clientMetricsCommands) {
+    for (const metric of clientMetricsCommands) {
       try {
-        // Validate metrics array structure
-        if (!Array.isArray(cmd.metrics)) {
-          throw new Error('metrics must be an array');
+        // Validate metric structure
+        if (!metric.group || typeof metric.group !== 'string') {
+          throw new Error('Each metric must have a "group" (string)');
+        }
+        if (typeof metric.value !== 'number') {
+          throw new Error('Each metric must have a "value" (number)');
         }
 
-        // Process each metric in the command
-        for (const metric of cmd.metrics) {
-          // Validate metric structure
-          if (!metric.group || typeof metric.group !== 'string') {
-            throw new Error('Each metric must have a "group" (string)');
-          }
-          if (typeof metric.value !== 'number') {
-            throw new Error('Each metric must have a "value" (number)');
-          }
-
-          // Record the client metric
-          metrics.recordClientMetric(
-            metric.group,
-            metric.value,
-            metric.tags || {},
-            cmd.worldInstanceId
-          );
-        }
+        // Record the client metric
+        metrics.recordClientMetric(
+          metric.group,
+          metric.value,
+          metric.tags || {},
+          cmd.worldInstanceId
+        );
 
         results.push({
-          originalIndex: cmd.originalIndex,
+          originalIndex: metric.originalIndex,
           type: 'emit',
-          result: { success: true, count: cmd.metrics.length }
+          result: { success: true }
         });
       } catch (error) {
         results.push({
-          originalIndex: cmd.originalIndex,
+          originalIndex: metric.originalIndex,
           type: 'emit',
           result: { success: false, error: error.message }
         });
