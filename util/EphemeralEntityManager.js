@@ -153,25 +153,28 @@ export class EphemeralEntityManager {
           const rankScoresToRemove = [];
           const streamData = {};
 
-          // Process attributes
-          Object.entries(attributes || {}).forEach(([field, value]) => {
-            if (InputValidator.isNullMarker(value)) {
-              // Mark for removal
-              attributesToRemove.push(field);
-            } else {
-              // Mark for set
-              attributesToSet[field] = value;
-              streamData[field] = value;
-            }
+          // Process attributes (including nested removals)
+          const {
+            sanitized: sanitizedAttributes,
+            keysToRemove: attributeKeysToRemove
+          } = InputValidator.sanitizeAttributes(attributes || {});
+
+          Object.entries(sanitizedAttributes).forEach(([field, value]) => {
+            attributesToSet[field] = value;
+            streamData[field] = value;
           });
+
+          attributesToRemove.push(...attributeKeysToRemove);
 
           // Process rankScores (nested map structure)
           if (rankScores) {
-            Object.entries(rankScores).forEach(([scoreType, partitionMap]) => {
-              if (InputValidator.isNullMarker(partitionMap)) {
-                // Remove entire score type
-                rankScoresToRemove.push(scoreType);
-              } else if (typeof partitionMap === 'object' && partitionMap !== null) {
+            const {
+              sanitized: sanitizedRankScores,
+              keysToRemove: rankKeysToRemove
+            } = InputValidator.sanitizeAttributes(rankScores);
+
+            Object.entries(sanitizedRankScores).forEach(([scoreType, partitionMap]) => {
+              if (typeof partitionMap === 'object' && partitionMap !== null) {
                 // Process partition map
                 rankScoresToSet[scoreType] = partitionMap;
                 // Add to stream data with flattened format "scoreType:partitionKey"
@@ -180,6 +183,8 @@ export class EphemeralEntityManager {
                 });
               }
             });
+
+            rankScoresToRemove.push(...rankKeysToRemove);
           }
 
           // Prepare stream update data (excluding NULL_MARKER values)

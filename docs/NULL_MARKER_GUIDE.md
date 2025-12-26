@@ -150,6 +150,26 @@ You can update some keys and remove others in the same operation:
 - `stamina` set to 200
 - `old_quest_data` key removed
 
+### Example 2b: Nested Key Removal
+
+To remove a nested key, set it to the NULL_MARKER inside its parent object:
+
+```json
+{
+  "type": "save_entity",
+  "entityType": "PlayerCharacter",
+  "entityId": "player123",
+  "worldId": 1,
+  "attributes": {
+    "stats": {
+      "temporary_buff": "$$__NULL__$$"
+    }
+  }
+}
+```
+
+**Result:** The `stats.temporary_buff` key is removed without replacing the rest of `stats`.
+
 ### Example 3: Rank Score Cleanup
 
 ```json

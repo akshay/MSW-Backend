@@ -199,7 +199,7 @@ BEGIN
       FOR key_to_remove IN
         SELECT jsonb_array_elements_text(entity_record->'attributes_keys_to_remove')
       LOOP
-        merged_attributes := merged_attributes - key_to_remove;
+        merged_attributes := merged_attributes #- string_to_array(key_to_remove, '.');
       END LOOP;
     END IF;
 
@@ -233,7 +233,7 @@ BEGIN
         FOR key_to_remove IN
           SELECT jsonb_array_elements_text(entity_record->'rank_scores_keys_to_remove')
         LOOP
-          merged_rank_scores := merged_rank_scores - key_to_remove;
+          merged_rank_scores := merged_rank_scores #- string_to_array(key_to_remove, '.');
         END LOOP;
       END IF;
     END IF;

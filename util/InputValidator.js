@@ -166,7 +166,7 @@ export class InputValidator {
   /**
    * Sanitize attributes object
    * Validates that attributes don't contain dangerous values
-   * Handles special NULL_MARKER for key removal
+   * Handles special NULL_MARKER for key removal, including nested keys
    */
   static sanitizeAttributes(attributes, options = {}) {
     if (!attributes || typeof attributes !== 'object') {
@@ -178,10 +178,26 @@ export class InputValidator {
     }
 
     const { processNullMarkers = true } = options;
-    const sanitized = {};
     const keysToRemove = [];
+    const sanitized = this.sanitizeAttributesRecursive(
+      attributes,
+      { processNullMarkers },
+      keysToRemove,
+      ''
+    );
+
+    return { sanitized, keysToRemove };
+  }
+
+  /**
+   * Recursively sanitize attributes and collect NULL_MARKER removal paths
+   */
+  static sanitizeAttributesRecursive(attributes, options, keysToRemove, pathPrefix) {
+    const sanitized = {};
 
     for (const [key, value] of Object.entries(attributes)) {
+      const currentPath = pathPrefix ? `${pathPrefix}.${key}` : key;
+
       // Validate key format
       if (!/^[a-zA-Z0-9_]+$/.test(key)) {
         throw new Error(`Invalid attribute key: ${key}. Only alphanumeric characters and underscores allowed.`);
@@ -192,8 +208,8 @@ export class InputValidator {
       }
 
       // Check for NULL_MARKER - indicates key should be removed
-      if (processNullMarkers && this.isNullMarker(value)) {
-        keysToRemove.push(key);
+      if (options.processNullMarkers && this.isNullMarker(value)) {
+        keysToRemove.push(currentPath);
         continue; // Don't add to sanitized object
       }
 
@@ -201,19 +217,43 @@ export class InputValidator {
       if (value !== null && value !== undefined) {
         const valueType = typeof value;
 
+        if (valueType === 'object') {
+          if (Array.isArray(value) || value.constructor !== Object) {
+            throw new Error(`Invalid attribute value type for ${currentPath}: object. Only plain objects are allowed.`);
+          }
+
+          if (Object.keys(value).length === 0) {
+            sanitized[key] = {};
+            continue;
+          }
+
+          const nestedSanitized = this.sanitizeAttributesRecursive(
+            value,
+            options,
+            keysToRemove,
+            currentPath
+          );
+
+          if (Object.keys(nestedSanitized).length > 0) {
+            sanitized[key] = nestedSanitized;
+          }
+
+          continue;
+        }
+
         if (!['string', 'number', 'boolean'].includes(valueType)) {
-          throw new Error(`Invalid attribute value type for ${key}: ${valueType}. Only string, number, boolean, or null allowed.`);
+          throw new Error(`Invalid attribute value type for ${currentPath}: ${valueType}. Only string, number, boolean, or null allowed.`);
         }
 
         if (valueType === 'string' && value.length > 10000) {
-          throw new Error(`Attribute value too long for ${key}`);
+          throw new Error(`Attribute value too long for ${currentPath}`);
         }
       }
 
       sanitized[key] = value;
     }
 
-    return { sanitized, keysToRemove };
+    return sanitized;
   }
 
   /**
