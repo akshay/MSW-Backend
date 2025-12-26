@@ -234,7 +234,6 @@ export class PersistentEntityManager {
 
   async performBatchUpsert(mergedUpdates) {
     const updateEntries = Array.from(mergedUpdates.entries());
-    const streamUpdates = []; // Collect stream updates
     const resultMap = new Map(); // Map to store results by entity key
 
     for (let i = 0; i < updateEntries.length; i += this.BATCH_SIZE) {
@@ -255,41 +254,6 @@ export class PersistentEntityManager {
         // Add rank scores if present
         if (rankScores && Object.keys(rankScores).length > 0) {
           entityData.rank_scores = rankScores;
-        }
-
-        // Prepare stream update
-        const streamId = KeyGenerator.getStreamId(environment, entityType, worldId, entityId);
-        const streamData = {};
-
-        if (isDelete) {
-          streamData.deleted = true;
-        } else {
-          // For creates/updates, include non-null-marker values
-          // Add attributes to stream (excluding NULL_MARKER values)
-          if (attributes) {
-            for (const [key, value] of Object.entries(attributes)) {
-              if (!InputValidator.isNullMarker(value)) {
-                streamData[key] = value;
-              }
-            }
-          }
-
-          // Add rank scores to stream (excluding NULL_MARKER values)
-          if (rankScores) {
-            for (const [key, value] of Object.entries(rankScores)) {
-              if (!InputValidator.isNullMarker(value)) {
-                streamData[key] = value;
-              }
-            }
-          }
-        }
-
-        // Only add to stream updates if there's data to send
-        if (Object.keys(streamData).length > 0) {
-          streamUpdates.push({
-            streamId,
-            data: streamData
-          });
         }
 
         return entityData;
