@@ -1,5 +1,6 @@
 // src/processors/CommandProcessor.js
-import { precomputeSharedKey as box_before, openSecretBox as box_open_afternm } from '@stablelib/nacl';
+import { randomBytes } from 'crypto';
+import { precomputeSharedKey as box_before, openSecretBox as box_open_afternm, secretBox as box_afternm } from '@stablelib/nacl';
 import { encode as encodeBase64, decode as decodeBase64 } from '@stablelib/base64';
 import { config } from '../config.js';
 import { HybridCacheManager } from './HybridCacheManager.js';
@@ -9,6 +10,15 @@ import { PersistentEntityManager } from './PersistentEntityManager.js';
 import { BackgroundPersistenceTask } from './BackgroundPersistenceTask.js';
 import { BackblazeFileManager } from './BackblazeFileManager.js';
 import { metrics } from './MetricsCollector.js';
+
+function createValidationError(message, statusCode = 400, details = null) {
+  const error = new Error(message);
+  error.statusCode = statusCode;
+  if (details) {
+    error.details = details;
+  }
+  return error;
+}
 
 // Simple ASCII encode/decode functions for authentication
 export function encodeAscii(str) {
@@ -112,6 +122,12 @@ export class CommandProcessor {
     }
   }
 
+  async processCloudRun(payload) {
+    const commandResults = await this.processCommands(payload);
+    const verification = this.encryptWorldInstanceId(payload.worldInstanceId);
+    return { ...commandResults, ...verification };
+  }
+
   async processCommands(payload) {
     const startTime = performance.now();
 
@@ -127,32 +143,30 @@ export class CommandProcessor {
       // Validate environment
       const { environment, commands } = payload;
       if (!environment || !config.allowedEnvironments.includes(environment)) {
-        return {
-          error: `Invalid environment: must be one of ${config.allowedEnvironments.join(', ')}`,
-          provided: environment
-        };
+        throw createValidationError(
+          `Invalid environment: must be one of ${config.allowedEnvironments.join(', ')}`,
+          400,
+          { provided: environment }
+        );
       }
 
       if (!commands || typeof commands !== 'object' || Array.isArray(commands)) {
-        return { error: 'Invalid request: commands array required' };
+        throw createValidationError('Invalid request: commands object is required');
       }
-
-      // Store environment for use in command processing
-      this.currentEnvironment = environment;
 
       // Group commands by type for optimal batching
       this.groupCommandsByType(commands, payload.worldInstanceId);
 
       // Process all command groups in parallel
       const results = await Promise.all([
-        this.processBatchedLoads(commands.load || []),
-        this.processBatchedSaves(commands.save || []),
-        this.processBatchedStreamAdds(commands.send || []),
-        this.processBatchedStreamPulls(commands.recv || []),
-        this.processBatchedSearchByName(commands.search || []),
-        this.processBatchedCalculateRank(commands.rank || []),
-        this.processBatchedGetRankings(commands.top || []),
-        this.processBatchedClientMetrics(commands.emit || [])
+        this.processBatchedLoads(commands.load || [], environment),
+        this.processBatchedSaves(commands.save || [], environment),
+        this.processBatchedStreamAdds(commands.send || [], environment),
+        this.processBatchedStreamPulls(commands.recv || [], environment),
+        this.processBatchedSearchByName(commands.search || [], environment),
+        this.processBatchedCalculateRank(commands.rank || [], environment),
+        this.processBatchedGetRankings(commands.top || [], environment),
+        this.processBatchedClientMetrics(commands.emit || [], payload.worldInstanceId)
       ]);
 
       // Reconstruct results in original command order
@@ -214,38 +228,38 @@ export class CommandProcessor {
   async validateAndDecryptRequest(payload) {
     const { encrypted, nonce, worldInstanceId, auth } = payload;
 
+    if (!worldInstanceId || typeof worldInstanceId !== 'string') {
+      throw createValidationError('worldInstanceId is required');
+    }
+
     // 1. Validate auth matches expected public key
     if (auth !== this.expectedAuth) {
-      throw new Error('Authentication failed: invalid auth token');
+      throw createValidationError('Authentication failed: invalid auth token', 401);
     }
 
     // 2. Validate encrypted string
     if (!encrypted) {
-      throw new Error('Invalid encrypted string: must be provided');
+      throw createValidationError('Invalid encrypted string: must be provided');
     }
 
     // 3. Decode and validate nonce
     if (!nonce) {
-      throw new Error('Nonce is required');
+      throw createValidationError('Nonce is required');
     }
 
     let nonceBytes;
     try {
       nonceBytes = decodeBase64(nonce);
     } catch (error) {
-      throw new Error('Invalid nonce: must be valid base64');
+      throw createValidationError('Invalid nonce: must be valid base64');
     }
 
     if (nonceBytes.length !== 24) {
-      throw new Error('Invalid nonce: decoded bytes must be exactly 24 bytes');
+      throw createValidationError('Invalid nonce: decoded bytes must be exactly 24 bytes');
     }
 
-    // 4. Extract sequence number, random, and elapsed time from nonce
+    // 4. Extract sequence number from nonce
     const sequenceNumber = this.readLittleEndianUint64(nonceBytes, 0);
-    const randomNumber = this.readLittleEndianUint64(nonceBytes, 8);
-    const elapsedSeconds = this.readLittleEndianUint64(nonceBytes, 16);
-
-    // console.log(`Nonce decoded - Sequence: ${sequenceNumber}, Random: ${randomNumber}, Elapsed: ${elapsedSeconds}`);
 
     // 5. Validate sequence number is strictly increasing
     await this.validateSequenceNumber(worldInstanceId, sequenceNumber);
@@ -257,17 +271,17 @@ export class CommandProcessor {
       // console.log(encryptedBytes);
       decryptedBytes = box_open_afternm(this.sharedSecret, nonceBytes, encryptedBytes);
     } catch (error) {
-      throw new Error(`Decryption failed: ${error.message}`);
+      throw createValidationError(`Decryption failed: ${error.message}`, 401);
     }
 
     if (!decryptedBytes) {
-      throw new Error('Decryption failed');
+      throw createValidationError('Decryption failed', 401);
     }
 
     // 7. Verify decrypted content matches worldInstanceId
     const decryptedString = decodeAscii(decryptedBytes);
     if (decryptedString !== worldInstanceId) {
-      throw new Error('Decryption verification failed: content does not match worldInstanceId');
+      throw createValidationError('Decryption verification failed: content does not match worldInstanceId', 401);
     }
 
     // console.log(`Request validated successfully for worldInstanceId: ${worldInstanceId}`);
@@ -292,7 +306,10 @@ export class CommandProcessor {
       if (currentSequence !== null) {
         // Sequence number must be strictly increasing
         if (sequenceNumber <= currentSequence) {
-          throw new Error(`Invalid sequence number: ${sequenceNumber} must be greater than ${currentSequence}`);
+          throw createValidationError(
+            `Invalid sequence number: ${sequenceNumber} must be greater than ${currentSequence}`,
+            409
+          );
         }
       }
 
@@ -301,7 +318,7 @@ export class CommandProcessor {
 
       // console.log(`Sequence number validated: ${sequenceNumber} for worldInstanceId: ${worldInstanceId}`);
     } catch (error) {
-      if (error.message.includes('Invalid sequence number')) {
+      if (error.statusCode) {
         throw error;
       }
       throw new Error(`Sequence number validation failed: ${error.message}`);
@@ -343,7 +360,7 @@ export class CommandProcessor {
     }
   }
 
-  async processBatchedLoads(loadCommands) {
+  async processBatchedLoads(loadCommands, environment) {
     if (loadCommands.length === 0) return [];
 
     // Separate ephemeral from persistent entities
@@ -360,18 +377,18 @@ export class CommandProcessor {
 
     // Process both types in parallel
     const [ephemeralResults, persistentResults] = await Promise.all([
-      this.processEphemeralLoads(ephemeralLoads),
-      this.processPersistentLoads(persistentLoads)
+      this.processEphemeralLoads(ephemeralLoads, environment),
+      this.processPersistentLoads(persistentLoads, environment)
     ]);
 
     return [...ephemeralResults, ...persistentResults];
   }
 
-  async processEphemeralLoads(commands) {
+  async processEphemeralLoads(commands, environment) {
     if (commands.length === 0) return [];
 
     const loadRequests = commands.map(cmd => ({
-      environment: this.currentEnvironment,
+      environment,
       entityType: cmd.entityType,
       entityId: cmd.entityId,
       worldId: cmd.worldId
@@ -386,11 +403,11 @@ export class CommandProcessor {
     }));
   }
 
-  async processPersistentLoads(commands) {
+  async processPersistentLoads(commands, environment) {
     if (commands.length === 0) return [];
 
     const loadRequests = commands.map(cmd => ({
-      environment: this.currentEnvironment,
+      environment,
       entityType: cmd.entityType,
       entityId: cmd.entityId,
       worldId: cmd.worldId
@@ -405,7 +422,7 @@ export class CommandProcessor {
     }));
   }
 
-  async processBatchedSaves(saveCommands) {
+  async processBatchedSaves(saveCommands, environment) {
     if (saveCommands.length === 0) return [];
 
     // Separate ephemeral from persistent entities
@@ -422,22 +439,22 @@ export class CommandProcessor {
 
     // Process both types in parallel (both auto-add to streams)
     const [ephemeralResults, persistentResults] = await Promise.all([
-      this.processEphemeralSaves(ephemeralSaves),
-      this.processPersistentSaves(persistentSaves)
+      this.processEphemeralSaves(ephemeralSaves, environment),
+      this.processPersistentSaves(persistentSaves, environment)
     ]);
 
     return [...ephemeralResults, ...persistentResults];
   }
 
-  async processEphemeralSaves(commands) {
+  async processEphemeralSaves(commands, environment) {
     if (commands.length === 0) return [];
 
     const updates = commands.map(cmd => ({
-      environment: this.currentEnvironment,
+      environment,
       entityType: cmd.entityType,
       entityId: cmd.entityId,
       worldId: cmd.worldId,
-      attributes: cmd.attributes,
+      attributes: cmd.attributes ?? cmd.message ?? {},
     }));
 
     // This automatically adds to streams via EphemeralEntityManager
@@ -450,14 +467,15 @@ export class CommandProcessor {
     }));
   }
 
-  async processPersistentSaves(commands) {
+  async processPersistentSaves(commands, environment) {
     if (commands.length === 0) return [];
 
     const updates = commands.map(cmd => {
       // Extract rank scores from attributes if present
       // rankScores now uses map<int32, int64> structure: { "scoreType": { "partitionKey": value } }
       const rankScores = {};
-      const attributes = { ...cmd.attributes };
+      const rawAttributes = cmd.attributes ?? cmd.message ?? {};
+      const attributes = { ...rawAttributes };
 
       // Look for rank score patterns and extract them
       // Expected format in attributes: "scoreType:partitionKey" -> value
@@ -470,7 +488,7 @@ export class CommandProcessor {
       });
 
       return {
-        environment: this.currentEnvironment,
+        environment,
         entityType: cmd.entityType,
         entityId: cmd.entityId,
         worldId: cmd.worldId,
@@ -491,13 +509,13 @@ export class CommandProcessor {
     }));
   }
 
-  async processBatchedStreamAdds(streamAddCommands) {
+  async processBatchedStreamAdds(streamAddCommands, environment) {
     if (streamAddCommands.length === 0) return [];
 
     // Add environment to commands
     const commandsWithEnv = streamAddCommands.map(cmd => ({
       ...cmd,
-      environment: this.currentEnvironment
+      environment
     }));
 
     const results = await this.streamManager.batchAddMessages(commandsWithEnv);
@@ -509,13 +527,13 @@ export class CommandProcessor {
     }));
   }
 
-  async processBatchedStreamPulls(streamPullCommands) {
+  async processBatchedStreamPulls(streamPullCommands, environment) {
     if (streamPullCommands.length === 0) return [];
 
     // Add environment to commands
     const commandsWithEnv = streamPullCommands.map(cmd => ({
       ...cmd,
-      environment: this.currentEnvironment
+      environment
     }));
 
     const results = await this.streamManager.batchPullMessages(commandsWithEnv);
@@ -527,12 +545,12 @@ export class CommandProcessor {
     }));
   }
 
-  async processBatchedSearchByName(searchCommands) {
+  async processBatchedSearchByName(searchCommands, environment) {
     if (searchCommands.length === 0) return [];
 
     // Use batch method for efficient cache operations
     const requests = searchCommands.map(cmd => ({
-      environment: this.currentEnvironment,
+      environment,
       entityType: cmd.entityType,
       namePattern: cmd.namePattern,
       worldId: cmd.worldId,
@@ -548,12 +566,12 @@ export class CommandProcessor {
     }));
   }
 
-  async processBatchedCalculateRank(calculateRankCommands) {
+  async processBatchedCalculateRank(calculateRankCommands, environment) {
     if (calculateRankCommands.length === 0) return [];
 
     // Use batch method for efficient cache operations
     const requests = calculateRankCommands.map(cmd => ({
-      environment: this.currentEnvironment,
+      environment,
       entityType: cmd.entityType,
       worldId: cmd.worldId,
       entityId: cmd.entityId,
@@ -569,12 +587,12 @@ export class CommandProcessor {
     }));
   }
 
-  async processBatchedGetRankings(getRankingsCommands) {
+  async processBatchedGetRankings(getRankingsCommands, environment) {
     if (getRankingsCommands.length === 0) return [];
 
     // Use batch method for efficient cache operations
     const requests = getRankingsCommands.map(cmd => ({
-      environment: this.currentEnvironment,
+      environment,
       entityType: cmd.entityType,
       worldId: cmd.worldId,
       rankKey: cmd.rankKey,
@@ -609,7 +627,7 @@ export class CommandProcessor {
     return returnMap;
   }
 
-  async processBatchedClientMetrics(clientMetricsCommands) {
+  async processBatchedClientMetrics(clientMetricsCommands, worldInstanceId) {
     if (clientMetricsCommands.length === 0) return [];
 
     const results = [];
@@ -629,7 +647,7 @@ export class CommandProcessor {
           metric.group,
           metric.value,
           metric.tags || {},
-          cmd.worldInstanceId
+          worldInstanceId
         );
 
         results.push({
@@ -651,6 +669,16 @@ export class CommandProcessor {
 
   isEphemeralEntityType(entityType) {
     return config.entityTypes.ephemeral.includes(entityType);
+  }
+
+  encryptWorldInstanceId(worldInstanceId) {
+    const nonceBytes = randomBytes(24);
+    const encryptedBytes = box_afternm(this.sharedSecret, nonceBytes, encodeAscii(worldInstanceId));
+
+    return {
+      encrypted: encodeBase64(encryptedBytes),
+      nonce: encodeBase64(nonceBytes)
+    };
   }
 
   /**

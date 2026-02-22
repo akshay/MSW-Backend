@@ -128,8 +128,8 @@ export class RateLimiter {
           });
         }
 
-        // Check if worldInstanceId is present (required for /process endpoint)
-        if (!worldInstanceId && req.path === '/process') {
+        // Check if worldInstanceId is present (required for /cloudrun endpoint)
+        if (!worldInstanceId && req.path === '/cloudrun') {
           return res.status(400).json({
             error: 'Bad Request',
             message: 'worldInstanceId is required'

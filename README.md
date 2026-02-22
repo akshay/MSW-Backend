@@ -42,7 +42,7 @@ All operations support efficient batching:
 ## API Endpoints
 
 - `GET /health` - Health check with service status
-- `POST /process` - Main batch command processing endpoint
+- `POST /cloudrun` - Main batch command processing endpoint
 
 ## Environment Variables
 

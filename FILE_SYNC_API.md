@@ -38,9 +38,9 @@ npm install backblaze-b2
 
 ## Request Format
 
-### New Parameters in `/process` Endpoint
+### New Parameters in `/cloudrun` Endpoint
 
-The existing POST `/process` endpoint now accepts two additional optional parameters:
+The existing POST `/cloudrun` endpoint now accepts two additional optional parameters:
 
 #### 1. `files` (Map<string, string>)
 
@@ -185,7 +185,7 @@ If a file download fails, the response includes an error:
 Send a request with the `files` parameter containing your current file hashes:
 
 ```javascript
-const response = await fetch('/process', {
+const response = await fetch('/cloudrun', {
   method: 'POST',
   headers: { 'Content-Type': 'application/json' },
   body: JSON.stringify({
@@ -231,7 +231,7 @@ Request file chunks with the `downloads` parameter:
 
 ```javascript
 // In your next request
-const response = await fetch('/process', {
+const response = await fetch('/cloudrun', {
   method: 'POST',
   headers: { 'Content-Type': 'application/json' },
   body: JSON.stringify({

@@ -26,7 +26,7 @@ These limits are enforced using a **sliding window algorithm** with Redis for di
 
 ### 1. Request Flow
 
-1. Client makes a request to the API (e.g., `/process`)
+1. Client makes a request to the API (e.g., `/cloudrun`)
 2. Rate limiter extracts:
    - Client IP address (from `req.ip`, `x-forwarded-for`, or `x-real-ip` headers)
    - World Instance ID (from `req.body.worldInstanceId`)
@@ -132,7 +132,7 @@ All identifiers are validated and sanitized to prevent injection attacks:
 }
 ```
 
-### Missing World Instance ID for /process (400)
+### Missing World Instance ID for /cloudrun (400)
 
 ```json
 {
@@ -214,14 +214,14 @@ redis-cli DEL $(redis-cli KEYS "ratelimit:*")
 ```bash
 # Test rate limit for IP
 for i in {1..201}; do
-  curl -X POST http://localhost:3000/process \
+  curl -X POST http://localhost:3000/cloudrun \
     -H "Content-Type: application/json" \
     -d '{"worldInstanceId": "test-world", "encrypted": "...", "nonce": "...", "auth": "...", "commands": []}'
 done
 
 # Test rate limit for World Instance ID (different IPs)
 for i in {1..201}; do
-  curl -X POST http://localhost:3000/process \
+  curl -X POST http://localhost:3000/cloudrun \
     -H "Content-Type: application/json" \
     -H "X-Forwarded-For: 192.168.1.$((i % 255))" \
     -d '{"worldInstanceId": "test-world", "encrypted": "...", "nonce": "...", "auth": "...", "commands": []}'

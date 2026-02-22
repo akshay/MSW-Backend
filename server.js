@@ -454,37 +454,34 @@ async function checkRedisHealth(redis, serviceName) {
   }
 }
 
-// Main batch processing endpoint
-app.post('/process', async (req, res) => {
+// Main CloudRunner endpoint
+app.post('/cloudrun', async (req, res) => {
   const startTime = performance.now();
-  
-  try {
-    // Process commands
-    const results = await commandProcessor.processCommands(req.body);
-    
-    const processingTime = performance.now() - startTime;
-    
-    res.json({ 
-      results,
-      meta: {
-        commandCount: commands.length,
-        processingTimeMs: Math.round(processingTime),
-        timestamp: new Date().toISOString()
-      }
-    });
 
+  try {
+    const response = await commandProcessor.processCloudRun(req.body);
+    res.json(response);
   } catch (error) {
-    console.error('API Error:', error);
-    
+    const statusCode = Number.isInteger(error.statusCode) ? error.statusCode : 500;
+    if (statusCode >= 500) {
+      console.error('API Error:', error);
+    }
+
     const processingTime = performance.now() - startTime;
-    
-    res.status(500).json({ 
-      error: 'Internal server error',
+
+    const response = {
+      error: statusCode >= 500 ? 'Internal server error' : error.message,
       meta: {
         processingTimeMs: Math.round(processingTime),
         timestamp: new Date().toISOString()
       }
-    });
+    };
+
+    if (error.details) {
+      response.details = error.details;
+    }
+
+    res.status(statusCode).json(response);
   }
 });
 
