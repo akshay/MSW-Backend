@@ -6,7 +6,7 @@
 ## Immediate Checks
 1. `GET /config/alerts?environment=<env>`
 2. `GET /metrics/prometheus` and inspect `config_sync_requests_total`.
-3. Check server logs for `/config/sync` exceptions.
+3. Check server logs for `/cloudrun` exceptions that involve `configSync`.
 
 ## Remediation
 1. Validate current manifest exists and is readable.
