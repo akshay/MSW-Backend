@@ -102,5 +102,17 @@ export const config = {
     productionBucket: process.env.BACKBLAZE_PRODUCTION_BUCKET,
     syncIntervalMs: parseInt(process.env.FILE_SYNC_INTERVAL_MS) || 60000, // Default: 60 seconds
     enabled: process.env.FILE_SYNC_ENABLED === 'true' || false
+  },
+
+  // Hot-reload config sync settings
+  configSync: {
+    enabled: process.env.CONFIG_SYNC_ENABLED === 'true' || process.env.FILE_SYNC_ENABLED === 'true' || false,
+    configDir: process.env.CONFIG_SYNC_DIR || '../MSW-Tools/data/config',
+    currentManifestPath: process.env.CONFIG_CURRENT_MANIFEST_PATH || 'current/manifest.json',
+    manifestsPrefix: process.env.CONFIG_MANIFEST_PREFIX || 'manifests',
+    filesPrefix: process.env.CONFIG_FILES_PREFIX || 'config',
+    pollIntervalMs: parseInt(process.env.CONFIG_POLL_INTERVAL_MS) || 20000, // Default: 20 seconds
+    maxVersionGapForDiff: parseInt(process.env.CONFIG_MAX_VERSION_GAP_FOR_DIFF) || 25,
+    healthRetentionSeconds: parseInt(process.env.CONFIG_HEALTH_RETENTION_SECONDS) || (7 * 24 * 60 * 60)
   }
 };

@@ -1,6 +1,7 @@
 // util/BackblazeFileManager.js
 import B2 from 'backblaze-b2';
 import crypto from 'crypto';
+import { readFile } from 'fs/promises';
 import { metrics } from './MetricsCollector.js';
 
 /**
@@ -25,6 +26,7 @@ export class BackblazeFileManager {
     // Track initialization and authorization
     this.isAuthorized = false;
     this.authorizationData = null;
+    this.bucketIdCache = new Map();
 
     // Sync interval (default: 60 seconds)
     this.syncIntervalMs = config.syncIntervalMs || 60000;
@@ -34,6 +36,8 @@ export class BackblazeFileManager {
     this.stats = {
       totalDownloads: 0,
       totalBytesDownloaded: 0,
+      totalUploads: 0,
+      totalBytesUploaded: 0,
       lastSyncTime: null,
       filesTracked: { staging: 0, production: 0 },
     };
@@ -45,9 +49,7 @@ export class BackblazeFileManager {
   async initialize() {
     try {
       console.log('[BackblazeFileManager] Authorizing with Backblaze B2...');
-      await this.b2.authorize();
-      this.isAuthorized = true;
-      this.authorizationData = this.b2.data;
+      await this.ensureAuthorized();
       console.log('[BackblazeFileManager] Successfully authorized with B2');
 
       // Initial sync of all files
@@ -61,6 +63,19 @@ export class BackblazeFileManager {
       console.error('[BackblazeFileManager] Failed to initialize:', error);
       throw error;
     }
+  }
+
+  /**
+   * Ensure B2 authorization is available (24h token)
+   */
+  async ensureAuthorized() {
+    if (this.isAuthorized) {
+      return;
+    }
+
+    await this.b2.authorize();
+    this.isAuthorized = true;
+    this.authorizationData = this.b2.data;
   }
 
   /**
@@ -276,6 +291,121 @@ export class BackblazeFileManager {
       metrics.recordError('file_download', error);
       throw error;
     }
+  }
+
+  /**
+   * Download a file from B2 by file name
+   */
+  async downloadFileByName(bucketName, fileName) {
+    try {
+      await this.ensureAuthorized();
+      const response = await this.b2.downloadFileByName({
+        bucketName,
+        fileName,
+        responseType: 'arraybuffer',
+      });
+
+      const buffer = Buffer.from(response.data);
+      return {
+        buffer,
+        hash: this.calculateSHA256(buffer),
+      };
+    } catch (error) {
+      console.error(`[BackblazeFileManager] Error downloading file by name ${fileName}:`, error);
+      throw error;
+    }
+  }
+
+  /**
+   * Resolve bucket name by environment
+   */
+  getBucketName(environment) {
+    if (environment === 'staging') {
+      return this.config.stagingBucket;
+    }
+    if (environment === 'production') {
+      return this.config.productionBucket;
+    }
+    return null;
+  }
+
+  async getBucketId(bucketName) {
+    if (this.bucketIdCache.has(bucketName)) {
+      return this.bucketIdCache.get(bucketName);
+    }
+
+    await this.ensureAuthorized();
+    const bucketResponse = await this.b2.getBucket({ bucketName });
+    const bucketId = bucketResponse?.data?.bucketId;
+
+    if (!bucketId) {
+      throw new Error(`Bucket not found: ${bucketName}`);
+    }
+
+    this.bucketIdCache.set(bucketName, bucketId);
+    return bucketId;
+  }
+
+  /**
+   * Upload a file to B2 and return upload metadata
+   * @param {string} filePath
+   * @param {string} b2Path
+   * @param {string|null} bucketName
+   * @returns {Promise<{fileId: string, sha256: string, size: number}>}
+   */
+  async uploadFile(filePath, b2Path, bucketName = null) {
+    const targetBucket = bucketName || this.config.stagingBucket || this.config.productionBucket;
+    if (!targetBucket) {
+      throw new Error('No Backblaze bucket configured for upload');
+    }
+
+    await this.ensureAuthorized();
+    const data = await readFile(filePath);
+    const sha256 = this.calculateSHA256(data);
+    const sha1 = crypto.createHash('sha1').update(data).digest('hex');
+    const bucketId = await this.getBucketId(targetBucket);
+
+    const maxRetries = 3;
+    let lastError = null;
+
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+      try {
+        const uploadUrlResponse = await this.b2.getUploadUrl({ bucketId });
+        const uploadData = uploadUrlResponse?.data || {};
+
+        if (!uploadData.uploadUrl || !uploadData.authorizationToken) {
+          throw new Error('Unable to obtain upload URL from Backblaze');
+        }
+
+        const uploadResponse = await this.b2.uploadFile({
+          uploadUrl: uploadData.uploadUrl,
+          uploadAuthToken: uploadData.authorizationToken,
+          fileName: b2Path,
+          data,
+          hash: sha1,
+          contentLength: data.length,
+          mime: 'application/json',
+        });
+
+        this.stats.totalUploads += 1;
+        this.stats.totalBytesUploaded += data.length;
+
+        return {
+          fileId: uploadResponse?.data?.fileId,
+          sha256,
+          size: data.length,
+        };
+      } catch (error) {
+        lastError = error;
+        if (attempt < maxRetries) {
+          await new Promise(resolve => setTimeout(resolve, 250 * attempt));
+          continue;
+        }
+      }
+    }
+
+    console.error(`[BackblazeFileManager] Error uploading file ${b2Path}:`, lastError);
+    throw lastError;
   }
 
   /**

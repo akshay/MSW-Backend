@@ -3,13 +3,54 @@ import 'dotenv/config';
 import express from 'express';
 import cors from 'cors';
 import helmet from 'helmet';
-import { config, ephemeralRedis, streamRedis } from './config.js';
+import { config, cacheRedis, ephemeralRedis, streamRedis } from './config.js';
 import { CommandProcessor } from './util/CommandProcessor.js';
 import { rateLimiter } from './util/RateLimiter.js';
 import { metrics } from './util/MetricsCollector.js';
+import { ConfigManifestService } from './services/ConfigManifestService.js';
+import { ConfigDiffService } from './services/ConfigDiffService.js';
+import { ConfigLock } from './util/ConfigLock.js';
+import { ConfigPollingService } from './services/ConfigPollingService.js';
+import { ConfigHealthService } from './services/ConfigHealthService.js';
+import { ConfigKeyGenerator } from './util/ConfigKeyGenerator.js';
+import { configDashboard } from './monitoring/config-dashboard.js';
+import { ALERT_RULES, evaluateConfigAlerts } from './monitoring/alerts.js';
 
 const app = express();
 const commandProcessor = new CommandProcessor();
+const configManifestService = new ConfigManifestService({
+  redis: cacheRedis,
+  b2: commandProcessor.fileManager,
+  configDir: config.configSync.configDir
+});
+const configDiffService = new ConfigDiffService({
+  redis: cacheRedis,
+  manifestService: configManifestService,
+  b2: commandProcessor.fileManager,
+  configDir: config.configSync.configDir
+});
+const configLock = new ConfigLock(cacheRedis);
+const configHealthService = new ConfigHealthService({ redis: cacheRedis });
+const configPollingService = new ConfigPollingService({
+  manifestService: configManifestService,
+  diffService: configDiffService,
+  healthService: configHealthService,
+  pollIntervalMs: config.configSync.pollIntervalMs
+});
+
+if (config.configSync.enabled && commandProcessor.fileManager) {
+  config.allowedEnvironments.forEach(environment => {
+    configPollingService.startPolling(environment, config.configSync.pollIntervalMs);
+  });
+}
+
+configPollingService.on('configUpdated', ({ environment, snapshotVersion }) => {
+  configDashboard.recordPublish(environment, 0, snapshotVersion, 'poll-update');
+});
+
+configPollingService.on('pollError', ({ environment, error }) => {
+  console.error(`[ConfigPollingService] ${environment} polling failed:`, error);
+});
 
 // Middleware
 app.use(helmet());
@@ -47,7 +88,11 @@ app.get('/health', async (req, res) => {
         cache: cacheHealth,
         ephemeral: ephemeralHealth,
         streams: streamHealth,
-        database: 'connected' // Prisma doesn't have a simple ping
+        database: 'connected', // Prisma doesn't have a simple ping
+        configSync: {
+          enabled: config.configSync.enabled,
+          polling: config.configSync.enabled ? 'running' : 'disabled'
+        }
       },
       backgroundTask: backgroundTaskStats
     };
@@ -87,6 +132,10 @@ app.get('/metrics/summary', (req, res) => {
 // Full metrics endpoint
 app.get('/metrics', (req, res) => {
   try {
+    if (req.query.format === 'prometheus') {
+      return res.redirect(307, '/metrics/prometheus');
+    }
+
     const allMetrics = metrics.getAllMetrics();
     res.json(allMetrics);
   } catch (error) {
@@ -98,11 +147,16 @@ app.get('/metrics', (req, res) => {
 });
 
 // Prometheus metrics endpoint
-app.get('/metrics/prometheus', (req, res) => {
+app.get('/metrics/prometheus', async (req, res) => {
   try {
-    const prometheusMetrics = metrics.toPrometheusFormat();
+    const coreMetrics = metrics.toPrometheusFormat();
+    const configMetrics = await configDashboard.toPrometheus({
+      environments: config.allowedEnvironments,
+      healthService: configHealthService
+    });
+
     res.setHeader('Content-Type', 'text/plain; version=0.0.4');
-    res.send(prometheusMetrics);
+    res.send(`${coreMetrics}\n${configMetrics}`);
   } catch (error) {
     res.status(500).json({
       error: 'Failed to export Prometheus metrics',
@@ -137,6 +191,300 @@ app.get('/stats/file-sync', (req, res) => {
   } catch (error) {
     res.status(500).json({
       error: 'Failed to get file sync stats',
+      message: error.message
+    });
+  }
+});
+
+function createApiError(message, statusCode = 400) {
+  const error = new Error(message);
+  error.statusCode = statusCode;
+  return error;
+}
+
+function getConfigSyncRequest(payload) {
+  return payload?.configSync
+    || (payload?.clientVersion !== undefined ? { clientVersion: payload.clientVersion } : null);
+}
+
+function validateConfigSyncRequestPayload(payload) {
+  const configSyncRequest = getConfigSyncRequest(payload);
+  if (!configSyncRequest) {
+    return false;
+  }
+
+  const environment = payload?.environment;
+  const parsedClientVersion = Number(configSyncRequest.clientVersion);
+
+  if (!environment || !config.allowedEnvironments.includes(environment)) {
+    throw createApiError(`environment must be one of: ${config.allowedEnvironments.join(', ')}`, 400);
+  }
+
+  if (!Number.isInteger(parsedClientVersion) || parsedClientVersion < 0) {
+    throw createApiError('configSync.clientVersion must be a non-negative integer', 400);
+  }
+
+  return true;
+}
+
+async function resolveConfigSyncPayload(payload) {
+  const configSyncRequest = getConfigSyncRequest(payload);
+
+  if (!configSyncRequest) {
+    return null;
+  }
+
+  const environment = payload?.environment;
+  const parsedClientVersion = Number(configSyncRequest.clientVersion);
+
+  try {
+    if (!environment || !config.allowedEnvironments.includes(environment)) {
+      throw createApiError(`environment must be one of: ${config.allowedEnvironments.join(', ')}`, 400);
+    }
+
+    if (!Number.isInteger(parsedClientVersion) || parsedClientVersion < 0) {
+      throw createApiError('configSync.clientVersion must be a non-negative integer', 400);
+    }
+
+    const currentManifest = await configManifestService.getCurrentManifest(environment);
+    if (!currentManifest) {
+      throw createApiError('No config manifest has been published for this environment', 404);
+    }
+
+    const currentVersion = Number(currentManifest.snapshotVersion);
+    const versionLagSeconds = Math.max(0, currentVersion - parsedClientVersion);
+
+    await configHealthService.reportClientVersion(parsedClientVersion, environment);
+    await configHealthService.setCurrentVersion(currentVersion, environment);
+
+    if (parsedClientVersion === currentVersion) {
+      configDashboard.recordSyncRequest(environment, 'no_change', versionLagSeconds);
+      return {
+        noChange: true,
+        currentVersion
+      };
+    }
+
+    if (currentVersion - parsedClientVersion > config.configSync.maxVersionGapForDiff) {
+      configDashboard.recordSyncRequest(environment, 'full_sync', versionLagSeconds);
+      return {
+        requiresFullSync: true,
+        currentVersion
+      };
+    }
+
+    const diff = await configDiffService.getDiff(parsedClientVersion, currentVersion, environment);
+    if (!diff) {
+      configDashboard.recordSyncRequest(environment, 'full_sync', versionLagSeconds);
+      return {
+        requiresFullSync: true,
+        currentVersion
+      };
+    }
+
+    configDashboard.recordSyncRequest(environment, 'diff', versionLagSeconds);
+    return {
+      snapshotVersion: currentVersion,
+      diff,
+      manifestId: currentManifest.manifestId || currentManifest.manifestHash
+    };
+  } catch (error) {
+    if (environment && Number.isInteger(parsedClientVersion)) {
+      await configHealthService.reportVersionError(parsedClientVersion, error.message, environment).catch(() => {});
+      configDashboard.recordSyncRequest(environment, 'error', 0);
+    }
+    throw error;
+  }
+}
+
+// Current config version endpoint
+app.get('/config/version', async (req, res) => {
+  try {
+    const environment = req.query.environment;
+    if (!environment || !config.allowedEnvironments.includes(environment)) {
+      return res.status(400).json({
+        error: `environment query must be one of: ${config.allowedEnvironments.join(', ')}`
+      });
+    }
+
+    const currentManifest = await configManifestService.getCurrentManifest(environment);
+    if (!currentManifest) {
+      return res.status(404).json({
+        error: 'No config manifest has been published for this environment'
+      });
+    }
+
+    await configHealthService.setCurrentVersion(currentManifest.snapshotVersion, environment);
+
+    return res.json({
+      currentVersion: currentManifest.snapshotVersion,
+      manifestId: currentManifest.manifestId || currentManifest.manifestHash
+    });
+  } catch (error) {
+    return res.status(500).json({
+      error: 'Failed to fetch config version',
+      message: error.message
+    });
+  }
+});
+
+// Roll back config to a previous version
+app.post('/config/rollback', async (req, res) => {
+  const { targetVersion, environment } = req.body || {};
+
+  if (!environment || !config.allowedEnvironments.includes(environment)) {
+    return res.status(400).json({
+      error: `environment must be one of: ${config.allowedEnvironments.join(', ')}`
+    });
+  }
+
+  const parsedTargetVersion = Number(targetVersion);
+  if (!Number.isInteger(parsedTargetVersion) || parsedTargetVersion < 0) {
+    return res.status(400).json({
+      error: 'targetVersion must be a non-negative integer'
+    });
+  }
+
+  const lockResult = await configLock.acquirePublishLock(environment, 60, { maxRetries: 0 });
+  if (!lockResult.acquired) {
+    return res.status(409).json({
+      error: 'Config publish lock is currently held by another operation'
+    });
+  }
+
+  const startedAt = performance.now();
+  try {
+    const currentManifest = await configManifestService.getCurrentManifest(environment);
+    if (!currentManifest) {
+      return res.status(404).json({
+        error: 'No current manifest available for rollback'
+      });
+    }
+
+    if (parsedTargetVersion >= Number(currentManifest.snapshotVersion)) {
+      return res.status(400).json({
+        error: 'targetVersion must be lower than current active version'
+      });
+    }
+
+    const rollbackManifest = await configManifestService.rollbackToVersion(parsedTargetVersion, environment);
+    const durationSeconds = (performance.now() - startedAt) / 1000;
+    configDashboard.recordPublish(environment, durationSeconds, rollbackManifest.snapshotVersion, rollbackManifest.label);
+    configDashboard.recordRollback(environment, parsedTargetVersion, rollbackManifest.snapshotVersion);
+
+    const auditEntry = {
+      timestamp: new Date().toISOString(),
+      environment,
+      targetVersion: parsedTargetVersion,
+      newVersion: rollbackManifest.snapshotVersion
+    };
+
+    const keyGenerator = new ConfigKeyGenerator(environment);
+    await cacheRedis.lpush(keyGenerator.rollbackAuditLog(), JSON.stringify(auditEntry));
+    await cacheRedis.ltrim(keyGenerator.rollbackAuditLog(), 0, 99);
+
+    return res.json({
+      success: true,
+      newVersion: rollbackManifest.snapshotVersion,
+      message: `Rolled back ${environment} config to version ${parsedTargetVersion}`
+    });
+  } catch (error) {
+    return res.status(500).json({
+      error: 'Failed to rollback config',
+      message: error.message
+    });
+  } finally {
+    await configLock.releasePublishLock(environment, lockResult.value);
+  }
+});
+
+// Config version health endpoints
+app.get('/config/health/:version', async (req, res) => {
+  try {
+    const environment = req.query.environment;
+    if (!environment || !config.allowedEnvironments.includes(environment)) {
+      return res.status(400).json({
+        error: `environment query must be one of: ${config.allowedEnvironments.join(', ')}`
+      });
+    }
+
+    const health = await configHealthService.getVersionHealth(req.params.version, environment);
+    return res.json(health);
+  } catch (error) {
+    return res.status(500).json({
+      error: 'Failed to get version health',
+      message: error.message
+    });
+  }
+});
+
+app.post('/config/health/mark-bad', async (req, res) => {
+  try {
+    const { environment, version, reason } = req.body || {};
+    if (!environment || !config.allowedEnvironments.includes(environment)) {
+      return res.status(400).json({
+        error: `environment must be one of: ${config.allowedEnvironments.join(', ')}`
+      });
+    }
+
+    await configHealthService.markVersionBad(version, reason, environment);
+    const health = await configHealthService.getVersionHealth(version, environment);
+    return res.json({ success: true, health });
+  } catch (error) {
+    return res.status(500).json({
+      error: 'Failed to mark version as bad',
+      message: error.message
+    });
+  }
+});
+
+// Simple active alerts endpoint
+app.get('/config/alerts', async (req, res) => {
+  try {
+    const environment = req.query.environment;
+    if (!environment || !config.allowedEnvironments.includes(environment)) {
+      return res.status(400).json({
+        error: `environment query must be one of: ${config.allowedEnvironments.join(', ')}`
+      });
+    }
+
+    const currentManifest = await configManifestService.getCurrentManifest(environment);
+    const currentVersion = currentManifest?.snapshotVersion ?? null;
+    const alerts = await evaluateConfigAlerts({
+      environment,
+      currentVersion,
+      healthService: configHealthService,
+      dashboardMetrics: configDashboard
+    });
+
+    return res.json({
+      environment,
+      currentVersion,
+      activeAlerts: alerts,
+      rules: ALERT_RULES
+    });
+  } catch (error) {
+    return res.status(500).json({
+      error: 'Failed to evaluate config alerts',
+      message: error.message
+    });
+  }
+});
+
+// Config dashboard endpoint
+app.get('/dashboard/config', async (req, res) => {
+  try {
+    const data = await configDashboard.getDashboardData({
+      environments: config.allowedEnvironments,
+      manifestService: configManifestService,
+      healthService: configHealthService
+    });
+    const html = configDashboard.renderDashboardHTML(data);
+    res.setHeader('Content-Type', 'text/html');
+    res.send(html);
+  } catch (error) {
+    res.status(500).json({
+      error: 'Failed to render config dashboard',
       message: error.message
     });
   }
@@ -459,8 +807,18 @@ app.post('/cloudrun', async (req, res) => {
   const startTime = performance.now();
 
   try {
-    const response = await commandProcessor.processCloudRun(req.body);
-    res.json(response);
+    const hasConfigSyncRequest = validateConfigSyncRequestPayload(req.body);
+    const commandResponse = await commandProcessor.processCloudRun(req.body);
+    const configSyncResponse = hasConfigSyncRequest ? await resolveConfigSyncPayload(req.body) : null;
+
+    if (configSyncResponse) {
+      return res.json({
+        ...commandResponse,
+        configSync: configSyncResponse
+      });
+    }
+
+    return res.json(commandResponse);
   } catch (error) {
     const statusCode = Number.isInteger(error.statusCode) ? error.statusCode : 500;
     if (statusCode >= 500) {
@@ -500,6 +858,8 @@ app.use((req, res) => {
 process.on('SIGTERM', async () => {
   console.log('SIGTERM received, shutting down gracefully');
 
+  configPollingService.shutdown();
+
   // Stop background tasks first (includes file sync)
   await commandProcessor.stopBackgroundTasks();
 
@@ -516,6 +876,8 @@ process.on('SIGTERM', async () => {
 
 process.on('SIGINT', async () => {
   console.log('SIGINT received, shutting down gracefully');
+
+  configPollingService.shutdown();
 
   // Stop background tasks first (includes file sync)
   await commandProcessor.stopBackgroundTasks();

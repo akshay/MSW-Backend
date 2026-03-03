@@ -40,7 +40,7 @@ npm install backblaze-b2
 
 ### New Parameters in `/cloudrun` Endpoint
 
-The existing POST `/cloudrun` endpoint now accepts two additional optional parameters:
+The existing POST `/cloudrun` endpoint now accepts additional optional parameters:
 
 #### 1. `files` (Map<string, string>)
 
@@ -72,6 +72,32 @@ A mapping of file names to download progress information. Used for progressive f
 {
   hash: string,           // Expected hash (must match current version)
   bytesReceived: number   // How many bytes already downloaded (offset)
+}
+```
+
+#### 3. `configSync` (Object)
+
+Carries client config snapshot version so config diffs can be returned in the same `/cloudrun` response.
+
+**Structure:**
+```json
+{
+  "clientVersion": 123
+}
+```
+
+**Response fragment (added to `/cloudrun`):**
+```json
+{
+  "configSync": {
+    "snapshotVersion": 124,
+    "manifestId": "4_z8f1...",
+    "diff": {
+      "fromVersion": 123,
+      "toVersion": 124,
+      "files": {}
+    }
+  }
 }
 ```
 

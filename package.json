@@ -9,6 +9,8 @@
     "test:watch": "jest --watch",
     "test:coverage": "jest --coverage",
     "benchmark": "node scripts/benchmark.js",
+    "config:publish": "node scripts/publish-config.js",
+    "config:shard-ui-plans": "node scripts/shard-ui-plans.js",
     "db:generate": "prisma generate --schema ./prisma/schema.prisma",
     "db:push": "prisma db push --schema ./prisma/schema.prisma",
     "db:migrate": "prisma migrate dev --schema ./prisma/schema.prisma"
