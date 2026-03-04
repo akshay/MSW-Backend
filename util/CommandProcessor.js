@@ -10,6 +10,7 @@ import { PersistentEntityManager } from './PersistentEntityManager.js';
 import { BackgroundPersistenceTask } from './BackgroundPersistenceTask.js';
 import { BackblazeFileManager } from './BackblazeFileManager.js';
 import { metrics } from './MetricsCollector.js';
+import { PresenceManager } from './PresenceManager.js';
 
 function createValidationError(message, statusCode = 400, details = null) {
   const error = new Error(message);
@@ -40,6 +41,7 @@ export class CommandProcessor {
     this.streamManager = new StreamManager();
     this.ephemeralManager = new EphemeralEntityManager(this.streamManager);
     this.persistentManager = new PersistentEntityManager(this.cache, this.streamManager, this.ephemeralManager);
+    this.presenceManager = new PresenceManager(this.persistentManager);
 
     // Initialize background persistence task
     this.backgroundTask = new BackgroundPersistenceTask(
@@ -68,6 +70,7 @@ export class CommandProcessor {
   async startBackgroundTasks() {
     console.log('Starting background tasks...');
     this.backgroundTask.start();
+    this.presenceManager.start();
 
     // Initialize file manager if enabled
     if (this.fileManager) {
@@ -85,6 +88,10 @@ export class CommandProcessor {
     console.log('Stopping background tasks...');
     if (this.backgroundTask) {
       this.backgroundTask.stop();
+    }
+
+    if (this.presenceManager) {
+      this.presenceManager.stop();
     }
 
     if (this.fileManager) {
@@ -166,7 +173,8 @@ export class CommandProcessor {
         this.processBatchedSearchByName(commands.search || [], environment),
         this.processBatchedCalculateRank(commands.rank || [], environment),
         this.processBatchedGetRankings(commands.top || [], environment),
-        this.processBatchedClientMetrics(commands.emit || [], payload.worldInstanceId)
+        this.processBatchedClientMetrics(commands.emit || [], payload.worldInstanceId),
+        this.processBatchedPresence(commands.presence || [], environment, payload.worldInstanceId)
       ]);
 
       // Reconstruct results in original command order
@@ -184,18 +192,27 @@ export class CommandProcessor {
         search: commands.search?.length || 0,
         rank: commands.rank?.length || 0,
         top: commands.top?.length || 0,
-        emit: commands.emit?.length || 0
+        emit: commands.emit?.length || 0,
+        presence: commands.presence?.length || 0
       };
 
+      const totalCommands = Object.values(commandCounts).reduce((a, b) => a + b, 0);
       Object.entries(commandCounts).forEach(([type, count]) => {
         if (count > 0) {
-          const avgDuration = processingTime / Object.values(commandCounts).reduce((a, b) => a + b, 0);
+          const avgDuration = totalCommands > 0 ? processingTime / totalCommands : 0;
           metrics.recordCommand(type, true, avgDuration, payload.worldInstanceId);
         }
       });
 
       // Handle file sync if files parameter is present
       const response = { ...orderedResults };
+
+      try {
+        response.playerPopulation = await this.presenceManager.getPlayerPopulationSnapshot(environment);
+      } catch (error) {
+        console.error('Failed to build player population snapshot:', error);
+        response.playerPopulation = this.presenceManager.getEmptySnapshot();
+      }
 
       if (this.fileManager && payload.files) {
         const fileSyncData = await this.processFileSync(
@@ -346,14 +363,20 @@ export class CommandProcessor {
         command.type = cmd;
         command.worldInstanceId = worldInstanceId;
 
-        // Validate required fields (skip for emit commands which have different structure)
-        if (cmd !== 'emit') {
+        // Validate required fields by command type
+        if (cmd !== 'emit' && cmd !== 'presence') {
           if (!command.entityType) {
             throw new Error(`Command ${i}: entityType is required`);
           }
 
           if (command.worldId === undefined || command.worldId === null) {
             throw new Error(`Command ${i}: worldId is required`);
+          }
+        }
+
+        if (cmd === 'presence') {
+          if (command.accountId === undefined && command.entityId === undefined && command.userId === undefined) {
+            throw new Error(`Command ${i}: presence.accountId is required`);
           }
         }
       }
@@ -665,6 +688,22 @@ export class CommandProcessor {
     }
 
     return results;
+  }
+
+  async processBatchedPresence(presenceCommands, environment, worldInstanceId) {
+    if (presenceCommands.length === 0) return [];
+
+    const results = await this.presenceManager.recordPresenceBatch(
+      presenceCommands,
+      environment,
+      worldInstanceId
+    );
+
+    return presenceCommands.map((cmd, index) => ({
+      originalIndex: cmd.originalIndex,
+      type: 'presence',
+      result: results[index] || { success: false }
+    }));
   }
 
   isEphemeralEntityType(entityType) {

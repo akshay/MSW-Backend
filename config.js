@@ -94,6 +94,16 @@ export const config = {
     maxRetries: parseInt(process.env.LOCK_MAX_RETRIES) || 3 // Default: 3
   },
 
+  // Presence and population settings
+  presence: {
+    heartbeatIntervalMs: parseInt(process.env.PRESENCE_HEARTBEAT_INTERVAL_MS) || 30000, // Default: 30 seconds
+    ttlMs: parseInt(process.env.PRESENCE_TTL_MS) || 60000, // Default: 1 minute
+    cleanupIntervalMs: parseInt(process.env.PRESENCE_CLEANUP_INTERVAL_MS) || 15000, // Default: 15 seconds
+    cleanupBatchSize: parseInt(process.env.PRESENCE_CLEANUP_BATCH_SIZE) || 500, // Default: 500 accounts per cycle
+    snapshotCacheMs: parseInt(process.env.PRESENCE_SNAPSHOT_CACHE_MS) || 30000, // Default: 30 seconds
+    cleanupLockTTLSeconds: parseInt(process.env.PRESENCE_CLEANUP_LOCK_TTL_SECONDS) || 10 // Default: 10 seconds
+  },
+
   // Backblaze B2 Configuration
   backblaze: {
     keyId: process.env.BACKBLAZE_KEY_ID,

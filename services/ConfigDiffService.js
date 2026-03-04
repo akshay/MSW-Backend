@@ -4,8 +4,11 @@ import { config } from '../config.js';
 import { EntityDiffUtil } from '../util/EntityDiffUtil.js';
 import { ConfigKeyGenerator } from '../util/ConfigKeyGenerator.js';
 import { NULL_MARKER } from '../util/config-diff-types.js';
+import { isSupportedConfigSyncFile } from '../util/ConfigSyncFileRouter.js';
 
 export class ConfigDiffService {
+  static NO_CHANGE = Symbol('NO_CHANGE');
+
   constructor({ redis, manifestService, b2, configDir = config.configSync.configDir } = {}) {
     this.redis = redis;
     this.manifestService = manifestService;
@@ -16,36 +19,13 @@ export class ConfigDiffService {
   computeDiff(oldConfig, newConfig) {
     const previous = this.normalizeToObject(oldConfig);
     const current = this.normalizeToObject(newConfig);
-    const diff = {};
-    const keys = new Set([...Object.keys(previous), ...Object.keys(current)]);
-
-    for (const key of keys) {
-      const hasOld = Object.prototype.hasOwnProperty.call(previous, key);
-      const hasNew = Object.prototype.hasOwnProperty.call(current, key);
-
-      if (!hasNew) {
-        diff[key] = NULL_MARKER;
-        continue;
-      }
-
-      if (!hasOld || !EntityDiffUtil.isEqual(previous[key], current[key])) {
-        diff[key] = current[key];
-      }
-    }
-
-    return diff;
+    return this.computeObjectDiff(previous, current);
   }
 
   applyDiff(configObject, diffObject) {
-    const base = { ...this.normalizeToObject(configObject) };
-    for (const [key, value] of Object.entries(diffObject || {})) {
-      if (value === NULL_MARKER) {
-        delete base[key];
-      } else {
-        base[key] = value;
-      }
-    }
-    return base;
+    const base = this.normalizeToObject(configObject);
+    const patch = this.normalizeToObject(diffObject);
+    return this.applyObjectDiff(base, patch);
   }
 
   async getDiff(fromVersion, toVersion, environment) {
@@ -80,6 +60,10 @@ export class ConfigDiffService {
     const fileDiffs = {};
 
     for (const fileName of fileNames) {
+      if (!isSupportedConfigSyncFile(fileName)) {
+        continue;
+      }
+
       const oldMeta = oldFiles[fileName];
       const newMeta = newFiles[fileName];
 
@@ -173,5 +157,71 @@ export class ConfigDiffService {
       return value;
     }
     return { __value__: value };
+  }
+
+  isPlainObject(value) {
+    return value !== null && typeof value === 'object' && !Array.isArray(value);
+  }
+
+  computeObjectDiff(previous, current) {
+    const diff = {};
+    const keys = new Set([...Object.keys(previous), ...Object.keys(current)]);
+
+    for (const key of keys) {
+      const hasOld = Object.prototype.hasOwnProperty.call(previous, key);
+      const hasNew = Object.prototype.hasOwnProperty.call(current, key);
+
+      if (!hasNew) {
+        diff[key] = NULL_MARKER;
+        continue;
+      }
+
+      if (!hasOld) {
+        diff[key] = current[key];
+        continue;
+      }
+
+      const nestedDiff = this.computeValueDiff(previous[key], current[key]);
+      if (nestedDiff !== ConfigDiffService.NO_CHANGE) {
+        diff[key] = nestedDiff;
+      }
+    }
+
+    return diff;
+  }
+
+  computeValueDiff(previous, current) {
+    if (EntityDiffUtil.isEqual(previous, current)) {
+      return ConfigDiffService.NO_CHANGE;
+    }
+
+    if (this.isPlainObject(previous) && this.isPlainObject(current)) {
+      const nested = this.computeObjectDiff(previous, current);
+      if (Object.keys(nested).length === 0) {
+        return ConfigDiffService.NO_CHANGE;
+      }
+      return nested;
+    }
+
+    // Arrays and primitive values replace at the current path.
+    return current;
+  }
+
+  applyObjectDiff(baseObject, patchObject) {
+    const result = { ...baseObject };
+    for (const [key, patchValue] of Object.entries(patchObject || {})) {
+      if (patchValue === NULL_MARKER) {
+        delete result[key];
+        continue;
+      }
+
+      const currentValue = result[key];
+      if (this.isPlainObject(currentValue) && this.isPlainObject(patchValue)) {
+        result[key] = this.applyObjectDiff(currentValue, patchValue);
+      } else {
+        result[key] = patchValue;
+      }
+    }
+    return result;
   }
 }

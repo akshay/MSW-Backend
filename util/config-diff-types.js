@@ -11,7 +11,8 @@ export const NULL_MARKER = '$$__NULL__$$';
 
 /**
  * @typedef {Record<string, ConfigDiffValue>} ConfigDiffFile
- * Top-level key changes for a single config file.
+ * Deep object patch for a single config file.
+ * Arrays replace wholesale; object keys may contain nested patches.
  */
 
 /**

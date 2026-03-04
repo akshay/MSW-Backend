@@ -79,6 +79,13 @@ A mapping of file names to download progress information. Used for progressive f
 
 Carries client config snapshot version so config diffs can be returned in the same `/cloudrun` response.
 
+`configSync.diff.files` uses deep JSON patches per file:
+- Object keys are patched recursively.
+- Deleted object keys use `$$__NULL__$$`.
+- Arrays are replaced wholesale at the changed path.
+
+Only mapped hot-reload files are included in config sync diffs (`global/item/job/map/mob/npc/cloud/script/ui_plans` plus `provider.json` and aliases).
+
 **Structure:**
 ```json
 {

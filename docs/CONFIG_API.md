@@ -154,11 +154,17 @@ Evaluates active alert conditions for an environment.
 
 ## Diff Format
 
-Diffs are custom per-file top-level key patches:
-- Added/updated key → direct JSON value
-- Deleted key → `$$__NULL__$$` (NULL marker)
+Diffs are custom per-file deep JSON patches:
+- Added/updated value → direct JSON value at the changed path
+- Deleted object key → `$$__NULL__$$` (NULL marker)
+- Arrays are replaced wholesale at the array path
 
 The marker must never appear as normal config data. Publishing validates and blocks marker collisions.
+
+Only mapped hot-reload files are synced:
+- `global.json`, `item.json`, `items.json`, `job.json`, `jobs.json`, `map.json`, `maps.json`
+- `mob.json`, `mobs.json`, `npc.json`, `npcs.json`, `cloud.json`, `script.json`
+- `ui_plans.json`, `ui_plans/index.json`, `provider.json`
 
 ## CLI
 
