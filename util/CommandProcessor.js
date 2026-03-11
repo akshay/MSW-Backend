@@ -11,6 +11,7 @@ import { BackgroundPersistenceTask } from './BackgroundPersistenceTask.js';
 import { BackblazeFileManager } from './BackblazeFileManager.js';
 import { metrics } from './MetricsCollector.js';
 import { PresenceManager } from './PresenceManager.js';
+import { buildCloudSearchResult, buildCloudTopResult, decodeCloudSaveMessage } from './CloudRunnerContract.js';
 
 function createValidationError(message, statusCode = 400, details = null) {
   const error = new Error(message);
@@ -477,7 +478,7 @@ export class CommandProcessor {
       entityType: cmd.entityType,
       entityId: cmd.entityId,
       worldId: cmd.worldId,
-      attributes: cmd.attributes ?? cmd.message ?? {},
+      attributes: decodeCloudSaveMessage(cmd),
     }));
 
     // This automatically adds to streams via EphemeralEntityManager
@@ -497,7 +498,7 @@ export class CommandProcessor {
       // Extract rank scores from attributes if present
       // rankScores now uses map<int32, int64> structure: { "scoreType": { "partitionKey": value } }
       const rankScores = {};
-      const rawAttributes = cmd.attributes ?? cmd.message ?? {};
+      const rawAttributes = decodeCloudSaveMessage(cmd);
       const attributes = { ...rawAttributes };
 
       // Look for rank score patterns and extract them
@@ -585,7 +586,7 @@ export class CommandProcessor {
     return searchCommands.map((cmd, index) => ({
       originalIndex: cmd.originalIndex,
       type: 'search',
-      result: results[index]
+      result: buildCloudSearchResult(results[index])
     }));
   }
 
@@ -628,7 +629,7 @@ export class CommandProcessor {
     return getRankingsCommands.map((cmd, index) => ({
       originalIndex: cmd.originalIndex,
       type: 'top',
-      result: results[index]
+      result: buildCloudTopResult(results[index])
     }));
   }
 

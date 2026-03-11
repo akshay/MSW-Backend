@@ -13,7 +13,12 @@
     "config:shard-ui-plans": "node scripts/shard-ui-plans.js",
     "db:generate": "prisma generate --schema ./prisma/schema.prisma",
     "db:push": "prisma db push --schema ./prisma/schema.prisma",
-    "db:migrate": "prisma migrate dev --schema ./prisma/schema.prisma"
+    "db:migrate": "prisma migrate dev --schema ./prisma/schema.prisma",
+    "backup:start": "node scripts/start-backup-worker.js",
+    "backup:dev": "NODE_ENV=development node workers/backup-worker.js",
+    "backup:list": "node scripts/restore-backup.js --list",
+    "backup:restore": "node scripts/restore-backup.js",
+    "backup:manual": "node -e \"require('./services/BackupService').runBackup().then(r => console.log(JSON.stringify(r, null, 2))).catch(e => { console.error(e); process.exit(1); })\""
   },
   "dependencies": {
     "@prisma/client": "^5.7.0",
@@ -23,9 +28,11 @@
     "cors": "^2.8.5",
     "dotenv": "^16.3.1",
     "express": "^4.18.2",
+    "fs-extra": "^11.3.4",
     "helmet": "^7.1.0",
     "ioredis": "^5.3.2",
     "node-cache": "^5.1.2",
+    "node-cron": "^3.0.3",
     "prisma": "^5.7.0"
   },
   "devDependencies": {

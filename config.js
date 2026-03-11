@@ -124,5 +124,24 @@ export const config = {
     pollIntervalMs: parseInt(process.env.CONFIG_POLL_INTERVAL_MS) || 20000, // Default: 20 seconds
     maxVersionGapForDiff: parseInt(process.env.CONFIG_MAX_VERSION_GAP_FOR_DIFF) || 25,
     healthRetentionSeconds: parseInt(process.env.CONFIG_HEALTH_RETENTION_SECONDS) || (7 * 24 * 60 * 60)
+  },
+
+  // Backup configuration
+  backup: {
+    enabled: process.env.BACKUP_ENABLED === 'true',
+    schedule: process.env.BACKUP_SCHEDULE || '0 */6 * * *',
+    retentionDays: parseInt(process.env.BACKUP_RETENTION_DAYS) || 7,
+    compressionLevel: parseInt(process.env.BACKUP_COMPRESSION_LEVEL) || 6,
+    b2Bucket: process.env.BACKBLAZE_BACKUP_BUCKET || process.env.BACKBLAZE_PRODUCTION_BUCKET,
+    b2Prefix: 'backups',
+    b2BucketId: null,
+    tempDir: process.env.BACKUP_TEMP_DIR || '/tmp/msw-backups',
+    workerPort: parseInt(process.env.BACKUP_WORKER_PORT) || 3001,
+    redisInstances: [
+      { name: 'cache', envKey: 'CACHE_REDIS_URL' },
+      { name: 'ephemeral', envKey: 'EPHEMERAL_REDIS_URL' },
+      { name: 'stream', envKey: 'STREAM_REDIS_URL' }
+    ],
+    logRetentionDays: parseInt(process.env.BACKUP_LOG_RETENTION_DAYS) || 7
   }
 };
