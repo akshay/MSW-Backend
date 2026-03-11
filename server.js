@@ -15,6 +15,8 @@ import { ConfigHealthService } from './services/ConfigHealthService.js';
 import { ConfigKeyGenerator } from './util/ConfigKeyGenerator.js';
 import { configDashboard } from './monitoring/config-dashboard.js';
 import { ALERT_RULES, evaluateConfigAlerts } from './monitoring/alerts.js';
+import { ConfigSnapshotReader } from './services/ConfigSnapshotReader.js';
+import { MobDropPreviewService } from './services/MobDropPreviewService.js';
 
 const app = express();
 const commandProcessor = new CommandProcessor();
@@ -36,6 +38,13 @@ const configPollingService = new ConfigPollingService({
   diffService: configDiffService,
   healthService: configHealthService,
   pollIntervalMs: config.configSync.pollIntervalMs
+});
+const configSnapshotReader = new ConfigSnapshotReader({
+  manifestService: configManifestService,
+  b2: commandProcessor.fileManager,
+});
+const mobDropPreviewService = new MobDropPreviewService({
+  snapshotReader: configSnapshotReader,
 });
 
 if (config.configSync.enabled && commandProcessor.fileManager) {
@@ -472,6 +481,52 @@ app.get('/config/alerts', async (req, res) => {
 });
 
 // Config dashboard endpoint
+app.get('/config/mob-drops/preview', async (req, res) => {
+  try {
+    const environment = req.query.environment;
+    if (!environment || !config.allowedEnvironments.includes(environment)) {
+      return res.status(400).json({
+        error: `environment query must be one of: ${config.allowedEnvironments.join(', ')}`
+      });
+    }
+
+    const parsedMobId = Number(req.query.mobId);
+    if (!Number.isInteger(parsedMobId) || parsedMobId <= 0) {
+      return res.status(400).json({
+        error: 'mobId query must be a positive integer'
+      });
+    }
+
+    const preview = await mobDropPreviewService.previewMobDrops({
+      environment,
+      mobId: parsedMobId,
+    });
+    return res.json(preview);
+  } catch (error) {
+    if (error.code === 'mob_not_found') {
+      return res.status(404).json({
+        error: error.message,
+      });
+    }
+    if (error.code === 'invalid_mob_id') {
+      return res.status(400).json({
+        error: error.message,
+      });
+    }
+    if (error.code === 'missing_snapshot_files' || error.code === 'snapshot_backend_unavailable') {
+      return res.status(503).json({
+        error: error.message,
+        missingData: error.missingData || [],
+      });
+    }
+
+    return res.status(500).json({
+      error: 'Failed to build mob drop preview',
+      message: error.message,
+    });
+  }
+});
+
 app.get('/dashboard/config', async (req, res) => {
   try {
     const data = await configDashboard.getDashboardData({

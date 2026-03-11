@@ -15,12 +15,16 @@ function buildService() {
 }
 
 describe('ConfigManifestService collectConfigFiles', () => {
-  test('includes only allowlisted config sync files', async () => {
+  test('includes sync files plus raw nx dashboard assets', async () => {
     const service = buildService();
     const tmpRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'config-manifest-test-'));
 
     await fs.writeFile(path.join(tmpRoot, 'global.json'), '{"ok":true}', 'utf8');
     await fs.writeFile(path.join(tmpRoot, 'provider.json'), '{"ok":true}', 'utf8');
+    await fs.mkdir(path.join(tmpRoot, 'provider'), { recursive: true });
+    await fs.writeFile(path.join(tmpRoot, 'provider', 'Mob.nx.json'), '{"ok":true}', 'utf8');
+    await fs.writeFile(path.join(tmpRoot, 'provider', 'Augment.nx.json'), '{"ok":true}', 'utf8');
+    await fs.writeFile(path.join(tmpRoot, 'provider', 'String.nx.json'), '{"ok":true}', 'utf8');
     await fs.writeFile(path.join(tmpRoot, 'script_js.json'), '{"skip":true}', 'utf8');
     await fs.mkdir(path.join(tmpRoot, 'ui_plans'), { recursive: true });
     await fs.writeFile(path.join(tmpRoot, 'ui_plans', 'index.json'), '{"ok":true}', 'utf8');
@@ -35,6 +39,9 @@ describe('ConfigManifestService collectConfigFiles', () => {
       expect(relative).toEqual([
         'global.json',
         'provider.json',
+        'provider/Augment.nx.json',
+        'provider/Mob.nx.json',
+        'provider/String.nx.json',
         'ui_plans/index.json',
       ]);
     } finally {

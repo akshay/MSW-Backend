@@ -141,6 +141,9 @@ export class ConfigDashboard {
   }
 
   renderDashboardHTML(data) {
+    const environmentOptions = Object.keys(data.byEnvironment)
+      .map((environment, index) => `<option value="${environment}"${index === 0 ? ' selected' : ''}>${environment}</option>`)
+      .join('');
     const sections = Object.entries(data.byEnvironment).map(([environment, info]) => {
       const distributionRows = info.versionDistribution.length > 0
         ? info.versionDistribution.map(item => `
@@ -195,6 +198,14 @@ export class ConfigDashboard {
     .meta { color: #94a3b8; margin-bottom: 24px; }
     .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(420px, 1fr)); gap: 16px; }
     .card { background: #111827; border: 1px solid #334155; border-radius: 8px; padding: 16px; }
+    .form-row { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 12px; }
+    label { display: flex; flex-direction: column; gap: 6px; color: #cbd5e1; font-size: 14px; }
+    input, select, button { border-radius: 6px; border: 1px solid #475569; background: #020617; color: #e2e8f0; padding: 10px 12px; }
+    button { cursor: pointer; background: #0ea5e9; border-color: #0ea5e9; color: #020617; font-weight: 600; }
+    .help { color: #94a3b8; font-size: 13px; margin-top: 8px; }
+    .warning-list { color: #fbbf24; margin-top: 12px; }
+    .profile-card { margin-top: 16px; padding: 12px; border: 1px solid #1e293b; border-radius: 8px; background: #020617; }
+    .muted { color: #94a3b8; }
     table { width: 100%; border-collapse: collapse; margin-top: 12px; }
     th, td { border-bottom: 1px solid #334155; padding: 8px; text-align: left; }
     th { color: #94a3b8; font-size: 12px; text-transform: uppercase; }
@@ -213,6 +224,116 @@ export class ConfigDashboard {
     </thead>
     <tbody>${publishRows}</tbody>
   </table>
+
+  <h2 class="section-title">Mob Drop Preview</h2>
+  <section class="card">
+    <form id="mob-drop-form">
+      <div class="form-row">
+        <label>
+          Environment
+          <select id="mob-drop-environment" name="environment">${environmentOptions}</select>
+        </label>
+        <label>
+          Mob ID
+          <input id="mob-drop-id" name="mobId" inputmode="numeric" placeholder="100100" required />
+        </label>
+        <label>
+          &nbsp;
+          <button type="submit">Load Drops</button>
+        </label>
+      </div>
+      <p class="help">Uses the active Backblaze snapshot for the selected environment, including raw NX files.</p>
+    </form>
+    <div id="mob-drop-status" class="help"></div>
+    <div id="mob-drop-results"></div>
+  </section>
+
+  <script>
+    (function () {
+      const form = document.getElementById('mob-drop-form');
+      const status = document.getElementById('mob-drop-status');
+      const results = document.getElementById('mob-drop-results');
+
+      function renderNotes(item) {
+        const notes = [];
+        if (item.jobRestricted) notes.push('job-specific');
+        if (item.questOnly) notes.push('quest-only');
+        if (item.conditional) notes.push('conditional');
+        if (Array.isArray(item.notes)) notes.push(...item.notes);
+        return notes.join(', ');
+      }
+
+      function renderQuantity(item) {
+        if (!item.quantity) return '1';
+        if (item.quantity.min === item.quantity.max) return String(item.quantity.min);
+        return item.quantity.min + ' - ' + item.quantity.max;
+      }
+
+      function renderProfile(profile) {
+        const rows = profile.items.map((item) => {
+          const chancePercent = (Number(item.approxChance || 0) * 100).toFixed(2) + '%';
+          return '<tr>' +
+            '<td>' + item.itemId + '</td>' +
+            '<td>' + item.name + '</td>' +
+            '<td>' + chancePercent + '</td>' +
+            '<td>' + renderQuantity(item) + '</td>' +
+            '<td>' + (item.sourceKinds || []).join(', ') + '</td>' +
+            '<td>' + renderNotes(item) + '</td>' +
+            '</tr>';
+        }).join('');
+
+        const warningMarkup = (profile.warnings || []).length > 0
+          ? '<ul class="warning-list">' + profile.warnings.map((warning) => '<li>' + warning + '</li>').join('') + '</ul>'
+          : '';
+
+        const title = profile.bossType
+          ? 'Boss profile: ' + profile.bossType
+          : 'Baseline mob profile';
+
+        return '<div class="profile-card">' +
+          '<h3>' + title + '</h3>' +
+          '<p class="muted">Difficulty ' + profile.difficulty + ' | Groups: ' + (profile.matchedGroups || []).join(', ') + '</p>' +
+          warningMarkup +
+          '<table>' +
+            '<thead><tr><th>Item ID</th><th>Name</th><th>Approx Chance</th><th>Qty</th><th>Sources</th><th>Notes</th></tr></thead>' +
+            '<tbody>' + rows + '</tbody>' +
+          '</table>' +
+          '</div>';
+      }
+
+      async function loadPreview(environment, mobId) {
+        status.textContent = 'Loading drop preview...';
+        results.innerHTML = '';
+        try {
+          const params = new URLSearchParams({ environment: environment, mobId: mobId });
+          const response = await fetch('/config/mob-drops/preview?' + params.toString());
+          const payload = await response.json();
+          if (!response.ok) {
+            throw new Error(payload.error || 'Failed to load preview');
+          }
+
+          status.textContent = 'Snapshot ' + payload.snapshotVersion + ' | Manifest ' + payload.manifestId + ' | Mob ' + payload.mob.name;
+          results.innerHTML = (payload.profiles || []).map(renderProfile).join('');
+          if ((payload.profiles || []).length === 0) {
+            results.innerHTML = '<p class="muted">No drop data resolved for this mob.</p>';
+          }
+        } catch (error) {
+          status.textContent = error.message;
+        }
+      }
+
+      form.addEventListener('submit', function (event) {
+        event.preventDefault();
+        const environment = document.getElementById('mob-drop-environment').value;
+        const mobId = document.getElementById('mob-drop-id').value.trim();
+        if (!mobId) {
+          status.textContent = 'Mob ID is required.';
+          return;
+        }
+        loadPreview(environment, mobId);
+      });
+    })();
+  </script>
 </body>
 </html>`;
   }

@@ -8,7 +8,7 @@ import { ConfigManifestService } from '../services/ConfigManifestService.js';
 import { ConfigValidator } from '../util/ConfigValidator.js';
 import { ConfigLock } from '../util/ConfigLock.js';
 import { ConfigKeyGenerator } from '../util/ConfigKeyGenerator.js';
-import { isSupportedConfigSyncFile } from '../util/ConfigSyncFileRouter.js';
+import { isTrackedConfigManifestFile } from '../util/ConfigManifestFileRegistry.js';
 
 function parseArgs(argv) {
   const result = {
@@ -102,7 +102,7 @@ async function validateConfigFiles(configDir) {
   let validatedCount = 0;
   for (const filePath of jsonFiles) {
     const relativePath = path.relative(configDir, filePath).split(path.sep).join('/');
-    if (!isSupportedConfigSyncFile(relativePath)) {
+    if (!isTrackedConfigManifestFile(relativePath)) {
       continue;
     }
     validatedCount += 1;

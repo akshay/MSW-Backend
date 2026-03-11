@@ -5,7 +5,7 @@ import { randomUUID } from 'crypto';
 import { config } from '../config.js';
 import { ConfigHasher } from '../util/ConfigHasher.js';
 import { ConfigKeyGenerator } from '../util/ConfigKeyGenerator.js';
-import { isSupportedConfigSyncFile } from '../util/ConfigSyncFileRouter.js';
+import { isTrackedConfigManifestFile } from '../util/ConfigManifestFileRegistry.js';
 
 export class ConfigManifestService {
   constructor({ redis, b2, hasher = new ConfigHasher(), configDir = config.configSync.configDir } = {}) {
@@ -245,7 +245,7 @@ export class ConfigManifestService {
 
       if (entry.isFile() && entry.name.endsWith('.json')) {
         const relativePath = this.toPosixPath(path.relative(baseDir, fullPath));
-        if (isSupportedConfigSyncFile(relativePath)) {
+        if (isTrackedConfigManifestFile(relativePath)) {
           files.push(fullPath);
         }
       }
