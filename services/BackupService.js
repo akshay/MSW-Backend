@@ -196,6 +196,16 @@ class BackupService {
     }
     console.log(`${'='.repeat(60)}\n`);
 
+    // Record metrics
+    try {
+      const { metrics } = require('../server.js');
+      if (metrics && typeof metrics.recordBackup === 'function') {
+        metrics.recordBackup(summary);
+      }
+    } catch (error) {
+      // Metrics not available, continue without recording
+    }
+
     return summary;
   }
 

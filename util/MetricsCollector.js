@@ -64,6 +64,32 @@ export class MetricsCollector {
         averageRunDuration: 0
       },
 
+      // Backup metrics
+      backups: {
+        total: 0,
+        successful: 0,
+        failed: 0,
+        totalBytes: 0,
+        avgDuration: 0,
+        durations: [],
+        byType: {
+          database: { 
+            count: 0, 
+            totalBytes: 0, 
+            avgDuration: 0,
+            successRate: 0,
+            errors: 0
+          },
+          redis: {
+            cache: { count: 0, totalBytes: 0, successRate: 0 },
+            ephemeral: { count: 0, totalBytes: 0, successRate: 0 },
+            stream: { count: 0, totalBytes: 0, successRate: 0 }
+          }
+        },
+        lastBackup: null,
+        lastBackupStatus: null
+      },
+
       // Performance metrics
       performance: {
         requestDurations: [],
@@ -705,6 +731,77 @@ export class MetricsCollector {
     });
 
     return lines.join('\n');
+  }
+
+  // Backup metrics
+  recordBackup(summary) {
+    this.metrics.backups.total++;
+    
+    if (summary.success) {
+      this.metrics.backups.successful++;
+    } else {
+      this.metrics.backups.failed++;
+    }
+    
+    this.metrics.backups.totalBytes += summary.totalSize || 0;
+    this.metrics.backups.lastBackup = summary.timestamp;
+    this.metrics.backups.lastBackupStatus = summary.success ? 'success' : 'failed';
+    
+    if (summary.duration) {
+      this.metrics.backups.durations.push(summary.duration);
+      if (this.metrics.backups.durations.length > 100) {
+        this.metrics.backups.durations.shift();
+      }
+      this.metrics.backups.avgDuration = 
+        this.metrics.backups.durations.reduce((a, b) => a + b, 0) / 
+        this.metrics.backups.durations.length;
+    }
+    
+    if (summary.database) {
+      this.metrics.backups.byType.database.count++;
+      if (summary.database.success) {
+        this.metrics.backups.byType.database.totalBytes += summary.database.size || 0;
+      } else {
+        this.metrics.backups.byType.database.errors++;
+      }
+      const dbCount = this.metrics.backups.byType.database.count;
+      const dbErrors = this.metrics.backups.byType.database.errors;
+      this.metrics.backups.byType.database.successRate = 
+        ((dbCount - dbErrors) / dbCount * 100).toFixed(1);
+    }
+    
+    if (summary.redis) {
+      for (const [instance, data] of Object.entries(summary.redis)) {
+        if (this.metrics.backups.byType.redis[instance]) {
+          this.metrics.backups.byType.redis[instance].count++;
+          if (data.success) {
+            this.metrics.backups.byType.redis[instance].totalBytes += data.size || 0;
+          }
+          const count = this.metrics.backups.byType.redis[instance].count;
+          const successCount = data.success ? count : count - 1;
+          this.metrics.backups.byType.redis[instance].successRate = 
+            ((successCount / count) * 100).toFixed(1);
+        }
+      }
+    }
+  }
+
+  getBackupSummary() {
+    const backups = this.metrics.backups;
+    return {
+      total: backups.total,
+      successful: backups.successful,
+      failed: backups.failed,
+      successRate: backups.total > 0 
+        ? ((backups.successful / backups.total) * 100).toFixed(1)
+        : 0,
+      totalBytes: backups.totalBytes,
+      totalMB: (backups.totalBytes / 1024 / 1024).toFixed(2),
+      avgDuration: Math.round(backups.avgDuration),
+      lastBackup: backups.lastBackup,
+      lastBackupStatus: backups.lastBackupStatus,
+      byType: backups.byType
+    };
   }
 
   // Reset all metrics (useful for testing)

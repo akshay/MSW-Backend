@@ -527,6 +527,278 @@ app.get('/config/mob-drops/preview', async (req, res) => {
   }
 });
 
+// Backup API endpoints
+app.get('/api/backups/history', async (req, res) => {
+  try {
+    const backupService = require('./services/BackupService');
+    const backups = await backupService.listBackups(20);
+    res.json({ backups, total: backups.length });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.get('/api/backups/stats', async (req, res) => {
+  try {
+    const backupService = require('./services/BackupService');
+    const RetentionManager = require('./services/RetentionManager');
+    const fetch = require('node-fetch');
+    
+    const retentionManager = new RetentionManager(config);
+    const stats = await backupService.getStats();
+    const storageStats = await retentionManager.getStats();
+    
+    const backups = await backupService.listBackups(100);
+    const successfulBackups = backups.filter(b => b.success);
+    const failedBackups = backups.filter(b => !b.success);
+    
+    const avgDuration = successfulBackups.length > 0
+      ? successfulBackups.reduce((sum, b) => sum + (b.duration || 0), 0) / successfulBackups.length
+      : 0;
+    
+    const avgSize = successfulBackups.length > 0
+      ? successfulBackups.reduce((sum, b) => sum + (b.totalSize || 0), 0) / successfulBackups.length
+      : 0;
+    
+    const successRate = backups.length > 0
+      ? (successfulBackups.length / backups.length) * 100
+      : 0;
+    
+    let scheduleInfo = {};
+    try {
+      const response = await fetch(`http://localhost:${config.backup.workerPort}/health`);
+      const health = await response.json();
+      scheduleInfo = {
+        enabled: config.backup.enabled,
+        cron: config.backup.schedule,
+        retentionDays: config.backup.retentionDays,
+        nextBackup: health.nextBackup,
+        lastBackup: health.lastBackup
+      };
+    } catch (error) {
+      scheduleInfo = {
+        enabled: config.backup.enabled,
+        cron: config.backup.schedule,
+        retentionDays: config.backup.retentionDays,
+        nextBackup: null,
+        lastBackup: null
+      };
+    }
+    
+    res.json({
+      storage: storageStats,
+      performance: {
+        successRate: successRate.toFixed(1),
+        avgDuration: Math.round(avgDuration),
+        avgSize: Math.round(avgSize),
+        totalBackups: backups.length,
+        failedBackups: failedBackups.length
+      },
+      schedule: scheduleInfo
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.post('/api/backups/restore', async (req, res) => {
+  try {
+    const { timestamp, type } = req.body;
+    
+    if (!timestamp) {
+      return res.status(400).json({ error: 'Timestamp required' });
+    }
+    
+    const restoreId = `restore-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+    
+    await cacheRedis.setex(
+      `restore:${restoreId}`,
+      300,
+      JSON.stringify({ timestamp, type, createdAt: Date.now() })
+    );
+    
+    const warning = type === 'full' 
+      ? 'This will REPLACE ALL your current data (database + all Redis instances)'
+      : type === 'db-only'
+      ? 'This will REPLACE your current database'
+      : `This will REPLACE your current ${type.replace('redis-', 'Redis ')} data`;
+    
+    res.json({
+      restoreId,
+      timestamp,
+      type,
+      warning,
+      requiresConfirmation: true
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.post('/api/backups/restore/confirm', async (req, res) => {
+  try {
+    const { restoreId, confirmTimestamp } = req.body;
+    
+    if (!restoreId || !confirmTimestamp) {
+      return res.status(400).json({ error: 'restoreId and confirmTimestamp required' });
+    }
+    
+    const restoreData = await cacheRedis.get(`restore:${restoreId}`);
+    
+    if (!restoreData) {
+      return res.status(404).json({ error: 'Restore request not found or expired' });
+    }
+    
+    const { timestamp, type, createdAt } = JSON.parse(restoreData);
+    
+    if (confirmTimestamp !== timestamp) {
+      return res.status(400).json({ error: 'Timestamp confirmation does not match' });
+    }
+    
+    const { spawn } = require('child_process');
+    const args = ['scripts/restore-backup.js', '--timestamp', timestamp, '--confirm'];
+    
+    if (type === 'db-only') {
+      args.push('--db-only');
+    } else if (type && type.startsWith('redis-')) {
+      args.push('--redis-only', type.replace('redis-', ''));
+    }
+    
+    const restoreProcess = spawn('node', args);
+    
+    let output = '';
+    let errorOutput = '';
+    
+    restoreProcess.stdout.on('data', (data) => {
+      output += data.toString();
+    });
+    
+    restoreProcess.stderr.on('data', (data) => {
+      errorOutput += data.toString();
+    });
+    
+    restoreProcess.on('close', (code) => {
+      cacheRedis.del(`restore:${restoreId}`);
+      
+      if (code === 0) {
+        const resultId = `result-${Date.now()}`;
+        cacheRedis.setex(
+          `restore-result:${resultId}`,
+          3600,
+          JSON.stringify({
+            success: true,
+            timestamp,
+            type,
+            output,
+            duration: Date.now() - createdAt
+          })
+        );
+        
+        res.json({
+          success: true,
+          restoreId,
+          resultId,
+          status: 'completed'
+        });
+      } else {
+        res.status(500).json({
+          success: false,
+          error: errorOutput || 'Restore failed',
+          output
+        });
+      }
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.get('/restore-result/:resultId', async (req, res) => {
+  try {
+    const resultData = await cacheRedis.get(`restore-result:${req.params.resultId}`);
+    
+    if (!resultData) {
+      return res.status(404).send('Restore result not found or expired');
+    }
+    
+    const result = JSON.parse(resultData);
+    
+    res.send(`
+      <!DOCTYPE html>
+      <html lang="en">
+      <head>
+        <meta charset="UTF-8">
+        <title>Restore Complete</title>
+        <style>
+          body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+            background: #0f172a;
+            color: #e2e8f0;
+            padding: 40px;
+            max-width: 800px;
+            margin: 0 auto;
+          }
+          .success { color: #22c55e; }
+          .card {
+            background: #1e293b;
+            border-radius: 8px;
+            padding: 30px;
+            border: 1px solid #334155;
+          }
+          .detail {
+            margin: 15px 0;
+            padding: 10px;
+            background: #0f172a;
+            border-radius: 4px;
+          }
+          .btn {
+            display: inline-block;
+            background: #38bdf8;
+            color: #0f172a;
+            padding: 10px 20px;
+            border-radius: 6px;
+            text-decoration: none;
+            font-weight: 600;
+            margin-top: 20px;
+          }
+          pre {
+            background: #0f172a;
+            padding: 15px;
+            border-radius: 4px;
+            overflow-x: auto;
+            font-size: 0.875rem;
+          }
+        </style>
+      </head>
+      <body>
+        <div class="card">
+          <h1 class="success">✓ Restore Completed Successfully</h1>
+          
+          <div class="detail">
+            <strong>Timestamp:</strong> ${result.timestamp}
+          </div>
+          
+          <div class="detail">
+            <strong>Type:</strong> ${result.type}
+          </div>
+          
+          <div class="detail">
+            <strong>Duration:</strong> ${result.duration}ms
+          </div>
+          
+          <h3 style="margin-top: 30px;">Output Log:</h3>
+          <pre>${result.output}</pre>
+          
+          <a href="/dashboard" class="btn">← Back to Dashboard</a>
+        </div>
+      </body>
+      </html>
+    `);
+  } catch (error) {
+    res.status(500).send('Error loading restore result');
+  }
+});
+
 app.get('/dashboard/config', async (req, res) => {
   try {
     const data = await configDashboard.getDashboardData({
@@ -604,6 +876,116 @@ function generateDashboardHTML() {
       margin-bottom: 20px;
     }
     .refresh-btn:hover { background: #7dd3fc; }
+    .restore-btn {
+      background: #3b82f6;
+      color: white;
+      border: none;
+      padding: 6px 12px;
+      border-radius: 4px;
+      cursor: pointer;
+      font-size: 0.75rem;
+      transition: background 0.2s;
+    }
+    .restore-btn:hover { background: #2563eb; }
+    .modal {
+      display: none;
+      position: fixed;
+      z-index: 1000;
+      left: 0;
+      top: 0;
+      width: 100%;
+      height: 100%;
+      background-color: rgba(0, 0, 0, 0.8);
+      overflow-y: auto;
+    }
+    .modal-content {
+      background: #1e293b;
+      margin: 3% auto;
+      padding: 30px;
+      border: 1px solid #334155;
+      border-radius: 8px;
+      width: 90%;
+      max-width: 600px;
+      color: #e2e8f0;
+    }
+    .modal-content h2 { margin-top: 0; }
+    .warning-box {
+      background: #7f1d1d;
+      border: 1px solid #ef4444;
+      padding: 15px;
+      border-radius: 6px;
+      margin: 20px 0;
+      font-weight: 600;
+    }
+    .backup-details {
+      background: #0f172a;
+      padding: 15px;
+      border-radius: 6px;
+      margin: 20px 0;
+    }
+    .backup-details ul { list-style: none; padding-left: 0; }
+    .backup-details li { padding: 5px 0; color: #94a3b8; }
+    .restore-options { margin: 20px 0; }
+    .restore-options label {
+      display: block;
+      padding: 10px;
+      margin: 5px 0;
+      background: #0f172a;
+      border-radius: 4px;
+      cursor: pointer;
+      transition: background 0.2s;
+    }
+    .restore-options label:hover { background: #1e293b; }
+    .restore-options input[type="radio"] { margin-right: 10px; }
+    .confirmation-input input[type="text"] {
+      width: 100%;
+      padding: 12px;
+      margin-top: 10px;
+      background: #0f172a;
+      border: 2px solid #334155;
+      border-radius: 4px;
+      color: #e2e8f0;
+      font-family: 'Courier New', monospace;
+      font-size: 0.875rem;
+    }
+    .confirmation-input input[type="text"]:focus {
+      outline: none;
+      border-color: #38bdf8;
+    }
+    .modal-actions {
+      display: flex;
+      justify-content: flex-end;
+      gap: 10px;
+      margin-top: 25px;
+    }
+    .cancel-btn {
+      background: #475569;
+      color: white;
+      border: none;
+      padding: 12px 24px;
+      border-radius: 6px;
+      cursor: pointer;
+      font-size: 0.875rem;
+      transition: background 0.2s;
+    }
+    .cancel-btn:hover { background: #64748b; }
+    .confirm-btn {
+      background: #ef4444;
+      color: white;
+      border: none;
+      padding: 12px 24px;
+      border-radius: 6px;
+      cursor: pointer;
+      font-weight: 600;
+      font-size: 0.875rem;
+      transition: background 0.2s;
+    }
+    .confirm-btn:disabled {
+      background: #475569;
+      cursor: not-allowed;
+      opacity: 0.6;
+    }
+    .confirm-btn:not(:disabled):hover { background: #dc2626; }
   </style>
 </head>
 <body>
@@ -767,6 +1149,144 @@ function generateDashboardHTML() {
       </div>
     </div>
 
+    <div class="section">
+      <h3 class="section-title">Backup Metrics</h3>
+      <div class="grid">
+        <div class="card">
+          <h2>Success Rate</h2>
+          <div class="value" id="backup-success-rate">—</div>
+          <div class="label">Last 20 backups</div>
+        </div>
+        <div class="card">
+          <h2>Storage Used</h2>
+          <div class="value" id="backup-storage">—</div>
+          <div class="label">Total in B2</div>
+        </div>
+        <div class="card">
+          <h2>Avg Backup Time</h2>
+          <div class="value" id="backup-avg-time">—</div>
+          <div class="label">Duration</div>
+        </div>
+        <div class="card">
+          <h2>Next Backup</h2>
+          <div class="value" id="backup-next-run">—</div>
+          <div class="label">Scheduled</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="section">
+      <h3 class="section-title">Backup History (Last 20)</h3>
+      <table>
+        <thead>
+          <tr>
+            <th>Timestamp</th>
+            <th>Status</th>
+            <th>Duration</th>
+            <th>Size</th>
+            <th>DB</th>
+            <th>Cache</th>
+            <th>Ephem</th>
+            <th>Stream</th>
+            <th>Actions</th>
+          </tr>
+        </thead>
+        <tbody id="backup-history-tbody">
+          <tr><td colspan="9" style="text-align: center;">Loading...</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="section">
+      <h3 class="section-title">Storage Statistics</h3>
+      <div class="grid">
+        <div class="card">
+          <h2>Database Backups</h2>
+          <div class="value" id="backup-db-count">—</div>
+          <div class="label" id="backup-db-size">0 MB</div>
+        </div>
+        <div class="card">
+          <h2>Redis Backups</h2>
+          <div class="value" id="backup-redis-count">—</div>
+          <div class="label" id="backup-redis-size">0 MB</div>
+        </div>
+        <div class="card">
+          <h2>Oldest Backup</h2>
+          <div class="value" style="font-size: 1rem;" id="backup-oldest">—</div>
+          <div class="label">Retention: 7 days</div>
+        </div>
+        <div class="card">
+          <h2>Schedule</h2>
+          <div class="value" style="font-size: 1rem;" id="backup-schedule">—</div>
+          <div class="label" id="backup-enabled">Status</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Restore Modal -->
+    <div id="restoreModal" class="modal">
+      <div class="modal-content">
+        <h2>⚠️ Confirm Restore</h2>
+        <p>You are about to restore backup from:</p>
+        <p><strong id="modal-timestamp"></strong></p>
+        
+        <div class="warning-box">
+          ⚠️ WARNING: <span id="modal-warning"></span>
+          <br>All current data will be lost!
+        </div>
+        
+        <div class="backup-details" id="modal-details">
+          <h3>Backup Details:</h3>
+          <ul id="modal-details-list"></ul>
+        </div>
+        
+        <div class="restore-options">
+          <h3 style="margin-bottom: 10px;">Restore Type:</h3>
+          <label>
+            <input type="radio" name="restoreType" value="db-only" checked>
+            Database Only (Recommended)
+          </label>
+          <label>
+            <input type="radio" name="restoreType" value="redis-cache">
+            Redis Cache Only
+          </label>
+          <label>
+            <input type="radio" name="restoreType" value="redis-ephemeral">
+            Redis Ephemeral Only
+          </label>
+          <label>
+            <input type="radio" name="restoreType" value="redis-stream">
+            Redis Stream Only
+          </label>
+          <label>
+            <input type="radio" name="restoreType" value="full">
+            ⚠️ Full Restore (ALL DATA)
+          </label>
+        </div>
+        
+        <div class="confirmation-input">
+          <label>
+            To proceed, type the exact timestamp:<br>
+            <strong id="modal-confirm-timestamp"></strong>
+          </label>
+          <input type="text" id="confirmTimestamp" 
+                 placeholder="Type timestamp here" autocomplete="off">
+        </div>
+        
+        <div class="modal-actions">
+          <button onclick="closeRestoreModal()" class="cancel-btn">
+            Cancel
+          </button>
+          <button onclick="executeRestore()" 
+                  class="confirm-btn" 
+                  id="confirmRestoreBtn" 
+                  disabled>
+            Confirm Restore
+          </button>
+        </div>
+      </div>
+    </div>
+
     ${summary.clientMetrics.groups.length > 0 ? `
     <div class="section">
       <h3 class="section-title">Client-Submitted Metrics</h3>
@@ -834,6 +1354,156 @@ function generateDashboardHTML() {
   <script>
     // Auto-refresh every 5 seconds
     setTimeout(() => location.reload(), 5000);
+    
+    // Backup functionality
+    let currentRestoreTimestamp = null;
+    let currentRestoreData = null;
+    
+    async function loadBackupData() {
+      try {
+        const [historyRes, statsRes] = await Promise.all([
+          fetch('/api/backups/history'),
+          fetch('/api/backups/stats')
+        ]);
+        
+        const history = await historyRes.json();
+        const stats = await statsRes.json();
+        
+        document.getElementById('backup-success-rate').textContent = stats.performance.successRate + '%';
+        document.getElementById('backup-success-rate').className = 'value ' + (parseFloat(stats.performance.successRate) >= 95 ? 'high' : parseFloat(stats.performance.successRate) >= 90 ? 'medium' : 'low');
+        
+        const totalMB = (stats.storage.totalBytes / 1024 / 1024).toFixed(1);
+        document.getElementById('backup-storage').textContent = totalMB + ' MB';
+        
+        const avgSec = (stats.performance.avgDuration / 1000).toFixed(1);
+        document.getElementById('backup-avg-time').textContent = avgSec + 's';
+        
+        if (stats.schedule.nextBackup) {
+          const next = new Date(stats.schedule.nextBackup);
+          const now = new Date();
+          const diffMs = next - now;
+          const diffHours = Math.floor(diffMs / 3600000);
+          const diffMins = Math.floor((diffMs % 3600000) / 60000);
+          document.getElementById('backup-next-run').textContent = diffMs > 0 ? (diffHours > 0 ? diffHours + 'h ' + diffMins + 'm' : diffMins + 'm') : 'Now';
+        } else {
+          document.getElementById('backup-next-run').textContent = '—';
+        }
+        
+        const tbody = document.getElementById('backup-history-tbody');
+        tbody.innerHTML = history.backups.map(backup => {
+          const date = new Date(backup.timestamp);
+          const formatted = date.toLocaleString();
+          const statusIcon = backup.success ? '✓' : '✗';
+          const statusClass = backup.success ? 'high' : 'low';
+          const duration = (backup.duration / 1000).toFixed(1) + 's';
+          const size = (backup.totalSize / 1024 / 1024).toFixed(2) + ' MB';
+          const dbStatus = backup.database?.success ? '✓' : '—';
+          const cacheStatus = backup.redis?.cache?.success ? '✓' : '—';
+          const ephemStatus = backup.redis?.ephemeral?.success ? '✓' : '—';
+          const streamStatus = backup.redis?.stream?.success ? '✓' : '—';
+          const backupData = JSON.stringify(backup).replace(/"/g, '&quot;');
+          return '<tr><td>' + formatted + '</td><td class="' + statusClass + '">' + statusIcon + '</td><td>' + duration + '</td><td>' + size + '</td><td>' + dbStatus + '</td><td>' + cacheStatus + '</td><td>' + ephemStatus + '</td><td>' + streamStatus + '</td><td><button onclick="showRestoreModal(\'' + backup.timestamp + '\', ' + backupData + ')" class="restore-btn">Restore</button></td></tr>';
+        }).join('');
+        
+        document.getElementById('backup-db-count').textContent = stats.storage.byType.db.count;
+        document.getElementById('backup-db-size').textContent = (stats.storage.byType.db.bytes / 1024 / 1024).toFixed(1) + ' MB';
+        document.getElementById('backup-redis-count').textContent = stats.storage.byType.redis.count;
+        document.getElementById('backup-redis-size').textContent = (stats.storage.byType.redis.bytes / 1024 / 1024).toFixed(1) + ' MB';
+        
+        if (stats.storage.oldestBackup) {
+          const oldest = new Date(stats.storage.oldestBackup);
+          document.getElementById('backup-oldest').textContent = oldest.toLocaleDateString();
+        }
+        
+        document.getElementById('backup-schedule').textContent = stats.schedule.cron || '—';
+        document.getElementById('backup-enabled').textContent = stats.schedule.enabled ? 'Enabled' : 'Disabled';
+      } catch (error) {
+        console.error('Failed to load backup data:', error);
+      }
+    }
+    
+    function showRestoreModal(timestamp, backupData) {
+      currentRestoreTimestamp = timestamp;
+      currentRestoreData = backupData;
+      
+      document.getElementById('modal-timestamp').textContent = timestamp;
+      document.getElementById('modal-confirm-timestamp').textContent = timestamp;
+      document.getElementById('confirmTimestamp').value = '';
+      document.getElementById('confirmRestoreBtn').disabled = true;
+      document.getElementById('confirmRestoreBtn').textContent = 'Confirm Restore';
+      document.querySelector('input[name="restoreType"][value="db-only"]').checked = true;
+      updateWarningText('db-only');
+      
+      const detailsList = document.getElementById('modal-details-list');
+      detailsList.innerHTML = '<li>Database: ' + (backupData.database?.success ? (backupData.database.size / 1024 / 1024).toFixed(2) + ' MB' : 'Failed') + '</li><li>Redis Cache: ' + (backupData.redis?.cache?.success ? (backupData.redis.cache.size / 1024 / 1024).toFixed(2) + ' MB' : 'Failed') + '</li><li>Redis Ephemeral: ' + (backupData.redis?.ephemeral?.success ? (backupData.redis.ephemeral.size / 1024 / 1024).toFixed(2) + ' MB' : 'Failed') + '</li><li>Redis Stream: ' + (backupData.redis?.stream?.success ? (backupData.redis.stream.size / 1024 / 1024).toFixed(2) + ' MB' : 'Failed') + '</li>';
+      
+      document.getElementById('restoreModal').style.display = 'block';
+      
+      document.getElementById('confirmTimestamp').addEventListener('input', function(e) {
+        document.getElementById('confirmRestoreBtn').disabled = e.target.value !== timestamp;
+      });
+      
+      document.querySelectorAll('input[name="restoreType"]').forEach(function(radio) {
+        radio.addEventListener('change', function(e) {
+          updateWarningText(e.target.value);
+        });
+      });
+    }
+    
+    function updateWarningText(type) {
+      var warningText = {
+        'db-only': 'This will REPLACE your current database!',
+        'redis-cache': 'This will REPLACE your current Redis cache data!',
+        'redis-ephemeral': 'This will REPLACE your current Redis ephemeral data!',
+        'redis-stream': 'This will REPLACE your current Redis stream data!',
+        'full': 'This will REPLACE ALL your current data (database + all Redis instances)!'
+      };
+      document.getElementById('modal-warning').textContent = warningText[type] || warningText['db-only'];
+    }
+    
+    async function executeRestore() {
+      var restoreType = document.querySelector('input[name="restoreType"]:checked').value;
+      var confirmTimestamp = document.getElementById('confirmTimestamp').value;
+      
+      if (confirmTimestamp !== currentRestoreTimestamp) {
+        alert('Timestamp does not match!');
+        return;
+      }
+      
+      var confirmBtn = document.getElementById('confirmRestoreBtn');
+      confirmBtn.textContent = 'Restoring...';
+      confirmBtn.disabled = true;
+      
+      try {
+        var initResponse = await fetch('/api/backups/restore', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ timestamp: currentRestoreTimestamp, type: restoreType })
+        });
+        var initData = await initResponse.json();
+        if (!initResponse.ok) throw new Error(initData.error || 'Failed to initiate restore');
+        
+        var confirmResponse = await fetch('/api/backups/restore/confirm', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ restoreId: initData.restoreId, confirmTimestamp: currentRestoreTimestamp })
+        });
+        var confirmData = await confirmResponse.json();
+        if (!confirmResponse.ok) throw new Error(confirmData.error || 'Restore failed');
+        
+        window.location.href = '/restore-result/' + confirmData.resultId;
+      } catch (error) {
+        alert('Restore failed: ' + error.message);
+        confirmBtn.textContent = 'Confirm Restore';
+        confirmBtn.disabled = false;
+      }
+    }
+    
+    function closeRestoreModal() {
+      document.getElementById('restoreModal').style.display = 'none';
+    }
+    
+    loadBackupData();
   </script>
 </body>
 </html>
