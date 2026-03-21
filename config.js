@@ -39,6 +39,14 @@ export const cacheRedis = new Redis(process.env.CACHE_REDIS_URL, {
   'maxmemory-policy': 'volatile-ttl'
 });
 
+export const auditRedis = new Redis(process.env.AUDIT_REDIS_URL || process.env.STREAM_REDIS_URL, {
+  maxRetriesPerRequest: 3,
+  retryDelayOnFailover: 100,
+  lazyConnect: true,
+  maxmemory: '512mb',
+  'maxmemory-policy': 'allkeys-lru'
+});
+
 // In-memory cache with configurable TTL and max size
 export const cacheTTL = parseInt(process.env.CACHE_TTL_SECONDS) || 300; // Default: 5 minutes
 export const cacheMaxSize = parseInt(process.env.CACHE_MAX_SIZE) || 10000; // Default: 10,000 entries
@@ -114,6 +122,20 @@ export const config = {
     enabled: process.env.FILE_SYNC_ENABLED === 'true' || false
   },
 
+  // S3-compatible storage Configuration (MinIO, Backblaze S3 API, AWS S3, etc.)
+  s3: {
+    endpoint: process.env.S3_ENDPOINT || null, // e.g., http://localhost:9000 for MinIO
+    region: process.env.S3_REGION || 'us-east-1',
+    accessKeyId: process.env.S3_ACCESS_KEY_ID || process.env.BACKBLAZE_KEY_ID,
+    secretAccessKey: process.env.S3_SECRET_ACCESS_KEY || process.env.BACKBLAZE_KEY,
+    stagingBucket: process.env.S3_STAGING_BUCKET || process.env.BACKBLAZE_STAGING_BUCKET || 'staging',
+    productionBucket: process.env.S3_PRODUCTION_BUCKET || process.env.BACKBLAZE_PRODUCTION_BUCKET || 'production',
+    backupBucket: process.env.S3_BACKUP_BUCKET || 'backups',
+    syncIntervalMs: parseInt(process.env.FILE_SYNC_INTERVAL_MS) || 60000,
+    enabled: process.env.FILE_SYNC_ENABLED === 'true' || false,
+    forcePathStyle: process.env.S3_FORCE_PATH_STYLE !== 'false' // Required for MinIO
+  },
+
   // Hot-reload config sync settings
   configSync: {
     enabled: process.env.CONFIG_SYNC_ENABLED === 'true' || process.env.FILE_SYNC_ENABLED === 'true' || false,
@@ -143,5 +165,17 @@ export const config = {
       { name: 'stream', envKey: 'STREAM_REDIS_URL' }
     ],
     logRetentionDays: parseInt(process.env.BACKUP_LOG_RETENTION_DAYS) || 7
+  },
+
+  audit: {
+    enabled: process.env.AUDIT_ENABLED !== 'false',
+    streamKey: process.env.AUDIT_STREAM_KEY || 'audit:commands',
+    maxStreamLength: parseInt(process.env.AUDIT_STREAM_MAX_LEN) || 500000,
+    streamTTL: parseInt(process.env.AUDIT_STREAM_TTL_SECONDS) || 604800,
+    archiveIntervalMs: parseInt(process.env.AUDIT_ARCHIVE_INTERVAL_MS) || 5000,
+    batchSize: parseInt(process.env.AUDIT_BATCH_SIZE) || 1000,
+    dbRetentionDays: parseInt(process.env.AUDIT_DB_RETENTION_DAYS) || 30,
+    lockTTL: parseInt(process.env.AUDIT_LOCK_TTL_SECONDS) || 10,
+    skipCommands: ['emit', 'presence']
   }
 };

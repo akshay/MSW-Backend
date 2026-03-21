@@ -17,6 +17,9 @@ import { configDashboard } from './monitoring/config-dashboard.js';
 import { ALERT_RULES, evaluateConfigAlerts } from './monitoring/alerts.js';
 import { ConfigSnapshotReader } from './services/ConfigSnapshotReader.js';
 import { MobDropPreviewService } from './services/MobDropPreviewService.js';
+import { auditLogger } from './util/AuditLogger.js';
+import { backgroundAuditArchiver } from './util/BackgroundAuditArchiver.js';
+import { auditService } from './services/AuditService.js';
 
 const app = express();
 const commandProcessor = new CommandProcessor();
@@ -68,6 +71,11 @@ app.use(express.json({ limit: '10mb' }));
 
 // Rate limiting middleware - must be after body parsers
 app.use(rateLimiter.middleware());
+
+// Start audit archiver
+if (config.audit.enabled) {
+  backgroundAuditArchiver.start();
+}
 
 // Health check endpoint
 // src/server.js - Updated health check
@@ -200,6 +208,189 @@ app.get('/stats/file-sync', (req, res) => {
   } catch (error) {
     res.status(500).json({
       error: 'Failed to get file sync stats',
+      message: error.message
+    });
+  }
+});
+
+// Audit stats endpoint
+app.get('/audit/stats', async (req, res) => {
+  try {
+    const stats = await auditService.getStats();
+    const archiverStats = backgroundAuditArchiver.getStats();
+    res.json({
+      ...stats,
+      archiver: archiverStats
+    });
+  } catch (error) {
+    res.status(500).json({
+      error: 'Failed to get audit stats',
+      message: error.message
+    });
+  }
+});
+
+// Audit breakdown stats (command types and entity types)
+app.get('/audit/breakdown', async (req, res) => {
+  try {
+    const stats = await auditService.getBreakdownStats({
+      startDate: req.query.startDate,
+      endDate: req.query.endDate,
+      worldInstanceId: req.query.worldInstanceId,
+      environment: req.query.environment
+    });
+    res.json(stats);
+  } catch (error) {
+    res.status(500).json({
+      error: 'Failed to get audit breakdown',
+      message: error.message
+    });
+  }
+});
+
+// Audit error stats endpoint
+app.get('/audit/errors', async (req, res) => {
+  try {
+    const stats = await auditService.getErrorStats({
+      startDate: req.query.startDate,
+      endDate: req.query.endDate
+    });
+    res.json(stats);
+  } catch (error) {
+    res.status(500).json({
+      error: 'Failed to get audit error stats',
+      message: error.message
+    });
+  }
+});
+
+// Audit performance stats endpoint
+app.get('/audit/performance', async (req, res) => {
+  try {
+    const stats = await auditService.getPerformanceStats({
+      startDate: req.query.startDate,
+      endDate: req.query.endDate
+    });
+    res.json(stats);
+  } catch (error) {
+    res.status(500).json({
+      error: 'Failed to get audit performance stats',
+      message: error.message
+    });
+  }
+});
+
+// Audit logs endpoint with filtering
+app.get('/audit/logs', async (req, res) => {
+  try {
+    const { 
+      startDate, 
+      endDate, 
+      commandType,
+      entityType,
+      entityId,
+      worldInstanceId,
+      environment,
+      success,
+      limit = 100,
+      offset = 0
+    } = req.query;
+
+    const result = await auditService.getLogs({
+      startDate,
+      endDate,
+      commandType,
+      entityType,
+      entityId,
+      worldInstanceId,
+      environment,
+      success: success === 'true' ? true : success === 'false' ? false : undefined,
+      limit: parseInt(limit),
+      offset: parseInt(offset)
+    });
+
+    res.json(result);
+  } catch (error) {
+    res.status(500).json({
+      error: 'Failed to get audit logs',
+      message: error.message
+    });
+  }
+});
+
+// Single audit log detail
+app.get('/audit/logs/:id', async (req, res) => {
+  try {
+    const log = await auditService.getLogById(req.params.id);
+    if (!log) {
+      return res.status(404).json({ error: 'Log not found' });
+    }
+    res.json(log);
+  } catch (error) {
+    res.status(500).json({
+      error: 'Failed to get audit log',
+      message: error.message
+    });
+  }
+});
+
+// Recent audit logs from Redis stream
+app.get('/audit/recent', async (req, res) => {
+  try {
+    const limit = parseInt(req.query.limit) || 100;
+    const logs = await auditService.getRecentLogs(limit);
+    res.json({ logs, count: logs.length });
+  } catch (error) {
+    res.status(500).json({
+      error: 'Failed to get recent audit logs',
+      message: error.message
+    });
+  }
+});
+
+// Audit filter options (unique command types and entity types)
+app.get('/audit/filters', async (req, res) => {
+  try {
+    const [commandTypes, entityTypes] = await Promise.all([
+      auditService.getUniqueCommandTypes(),
+      auditService.getUniqueEntityTypes()
+    ]);
+    res.json({ commandTypes, entityTypes });
+  } catch (error) {
+    res.status(500).json({
+      error: 'Failed to get audit filters',
+      message: error.message
+    });
+  }
+});
+
+// Audit hourly volume
+app.get('/audit/volume', async (req, res) => {
+  try {
+    const hours = parseInt(req.query.hours) || 24;
+    const volume = await auditService.getHourlyVolume(hours);
+    res.json(volume);
+  } catch (error) {
+    res.status(500).json({
+      error: 'Failed to get audit volume',
+      message: error.message
+    });
+  }
+});
+
+// Request groups (group commands by request)
+app.get('/audit/requests', async (req, res) => {
+  try {
+    const groups = await auditService.getRequestGroups({
+      startDate: req.query.startDate,
+      endDate: req.query.endDate,
+      worldInstanceId: req.query.worldInstanceId,
+      limit: parseInt(req.query.limit) || 50
+    });
+    res.json({ groups, count: groups.length });
+  } catch (error) {
+    res.status(500).json({
+      error: 'Failed to get request groups',
       message: error.message
     });
   }
@@ -1343,17 +1534,128 @@ function generateDashboardHTML() {
     ` : ''}
 
     <div class="section">
+      <h3 class="section-title">Audit Logs</h3>
+      <div class="grid">
+        <div class="card">
+          <h2>Total Commands</h2>
+          <div class="value" id="audit-total">—</div>
+          <div class="label">Logged</div>
+        </div>
+        <div class="card">
+          <h2>Errors</h2>
+          <div class="value" id="audit-errors">—</div>
+          <div class="label" id="audit-error-rate">0% error rate</div>
+        </div>
+        <div class="card">
+          <h2>Archived</h2>
+          <div class="value" id="audit-archived">—</div>
+          <div class="label">To database</div>
+        </div>
+        <div class="card">
+          <h2>Stream Buffer</h2>
+          <div class="value" id="audit-stream-length">—</div>
+          <div class="label">Pending archival</div>
+        </div>
+      </div>
+      
+      <div style="background: #1e293b; padding: 20px; border-radius: 8px; margin-top: 20px;">
+        <h4 style="margin-bottom: 15px; color: #94a3b8;">Filters</h4>
+        <div class="grid" style="grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 10px;">
+          <div>
+            <label style="display: block; margin-bottom: 4px; color: #64748b; font-size: 0.7rem;">Command Type</label>
+            <select id="filter-commandType" style="width: 100%; padding: 6px; background: #0f172a; border: 1px solid #334155; border-radius: 4px; color: #e2e8f0; font-size: 0.8rem;">
+              <option value="">All</option>
+            </select>
+          </div>
+          <div>
+            <label style="display: block; margin-bottom: 4px; color: #64748b; font-size: 0.7rem;">Entity Type</label>
+            <select id="filter-entityType" style="width: 100%; padding: 6px; background: #0f172a; border: 1px solid #334155; border-radius: 4px; color: #e2e8f0; font-size: 0.8rem;">
+              <option value="">All</option>
+            </select>
+          </div>
+          <div>
+            <label style="display: block; margin-bottom: 4px; color: #64748b; font-size: 0.7rem;">World Instance</label>
+            <input type="text" id="filter-worldInstanceId" placeholder="Search..." style="width: 100%; padding: 6px; background: #0f172a; border: 1px solid #334155; border-radius: 4px; color: #e2e8f0; font-size: 0.8rem;">
+          </div>
+          <div>
+            <label style="display: block; margin-bottom: 4px; color: #64748b; font-size: 0.7rem;">Status</label>
+            <select id="filter-success" style="width: 100%; padding: 6px; background: #0f172a; border: 1px solid #334155; border-radius: 4px; color: #e2e8f0; font-size: 0.8rem;">
+              <option value="">All</option>
+              <option value="true">Success</option>
+              <option value="false">Failed</option>
+            </select>
+          </div>
+        </div>
+        <div style="margin-top: 10px;">
+          <button onclick="applyAuditFilters()" class="refresh-btn" style="padding: 6px 12px; font-size: 0.8rem;">Apply</button>
+          <button onclick="clearAuditFilters()" style="background: #475569; color: white; border: none; padding: 6px 12px; border-radius: 4px; cursor: pointer; margin-left: 8px; font-size: 0.8rem;">Clear</button>
+        </div>
+      </div>
+      
+      <div class="grid" style="margin-top: 20px;">
+        <div class="card">
+          <h2>By Command Type</h2>
+          <div id="command-breakdown" style="margin-top: 10px; max-height: 200px; overflow-y: auto;"></div>
+        </div>
+        <div class="card">
+          <h2>By Entity Type</h2>
+          <div id="entity-breakdown" style="margin-top: 10px; max-height: 200px; overflow-y: auto;"></div>
+        </div>
+      </div>
+      
+      <table style="margin-top: 20px;">
+        <thead>
+          <tr>
+            <th>Timestamp</th>
+            <th>Command</th>
+            <th>Entity Type</th>
+            <th>Entity ID</th>
+            <th>World Instance</th>
+            <th>Status</th>
+            <th>Duration</th>
+            <th>Actions</th>
+          </tr>
+        </thead>
+        <tbody id="audit-logs-tbody">
+          <tr><td colspan="8" style="text-align: center;">Loading...</td></tr>
+        </tbody>
+      </table>
+      
+      <div style="margin-top: 15px; display: flex; justify-content: space-between; align-items: center;">
+        <span id="audit-pagination-info" style="color: #94a3b8; font-size: 0.8rem;"></span>
+        <div>
+          <button id="audit-prev-btn" onclick="prevAuditPage()" style="background: #475569; color: white; border: none; padding: 6px 12px; border-radius: 4px; cursor: pointer; margin-right: 8px; font-size: 0.8rem;">Prev</button>
+          <button id="audit-next-btn" onclick="nextAuditPage()" style="background: #38bdf8; color: #0f172a; border: none; padding: 6px 12px; border-radius: 4px; cursor: pointer; font-size: 0.8rem;">Next</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="section">
       <p class="subtitle">
         <a href="/metrics" style="color: #38bdf8;">JSON API</a> |
         <a href="/metrics/prometheus" style="color: #38bdf8;">Prometheus Metrics</a> |
-        <a href="/health" style="color: #38bdf8;">Health Check</a>
+        <a href="/health" style="color: #38bdf8;">Health Check</a> |
+        <a href="/audit/stats" style="color: #38bdf8;">Audit Stats</a>
       </p>
+    </div>
+  </div>
+
+  <div id="logDetailModal" class="modal">
+    <div class="modal-content" style="max-width: 900px;">
+      <h2>Command Detail</h2>
+      <div id="log-detail-content"></div>
+      <div class="modal-actions">
+        <button onclick="closeLogDetailModal()" class="cancel-btn">Close</button>
+      </div>
     </div>
   </div>
 
   <script>
     // Auto-refresh every 5 seconds
     setTimeout(() => location.reload(), 5000);
+    
+    let auditPage = 0;
+    const auditPageSize = 50;
     
     // Backup functionality
     let currentRestoreTimestamp = null;
@@ -1503,7 +1805,170 @@ function generateDashboardHTML() {
       document.getElementById('restoreModal').style.display = 'none';
     }
     
+    async function loadAuditFilters() {
+      try {
+        const res = await fetch('/audit/filters');
+        const data = await res.json();
+        
+        const cmdSelect = document.getElementById('filter-commandType');
+        const entSelect = document.getElementById('filter-entityType');
+        
+        (data.commandTypes || []).forEach(type => {
+          const opt = document.createElement('option');
+          opt.value = type;
+          opt.textContent = type;
+          cmdSelect.appendChild(opt);
+        });
+        
+        (data.entityTypes || []).forEach(type => {
+          const opt = document.createElement('option');
+          opt.value = type;
+          opt.textContent = type;
+          entSelect.appendChild(opt);
+        });
+      } catch (error) {
+        console.error('Failed to load audit filters:', error);
+      }
+    }
+    
+    async function loadAuditBreakdown() {
+      try {
+        const res = await fetch('/audit/breakdown');
+        const data = await res.json();
+        
+        const cmdContainer = document.getElementById('command-breakdown');
+        const cmdTotal = (data.byCommandType || []).reduce((sum, c) => sum + c.count, 0);
+        cmdContainer.innerHTML = (data.byCommandType || []).slice(0, 10).map(c => {
+          const pct = cmdTotal > 0 ? ((c.count / cmdTotal) * 100).toFixed(0) : 0;
+          return '<div style="margin-bottom: 6px;"><div style="display: flex; justify-content: space-between; font-size: 0.75rem;"><span>' + c.type + '</span><span>' + c.count.toLocaleString() + '</span></div><div style="background: #0f172a; border-radius: 3px; height: 4px; margin-top: 2px;"><div style="background: #38bdf8; height: 100%; border-radius: 3px; width: ' + pct + '%;"></div></div></div>';
+        }).join('');
+        
+        const entContainer = document.getElementById('entity-breakdown');
+        const entTotal = (data.byEntityType || []).reduce((sum, e) => sum + e.count, 0);
+        entContainer.innerHTML = (data.byEntityType || []).slice(0, 10).map(e => {
+          const pct = entTotal > 0 ? ((e.count / entTotal) * 100).toFixed(0) : 0;
+          return '<div style="margin-bottom: 6px;"><div style="display: flex; justify-content: space-between; font-size: 0.75rem;"><span>' + e.type + '</span><span>' + e.count.toLocaleString() + '</span></div><div style="background: #0f172a; border-radius: 3px; height: 4px; margin-top: 2px;"><div style="background: #22c55e; height: 100%; border-radius: 3px; width: ' + pct + '%;"></div></div></div>';
+        }).join('');
+      } catch (error) {
+        console.error('Failed to load audit breakdown:', error);
+      }
+    }
+    
+    async function loadAuditLogs() {
+      try {
+        const params = new URLSearchParams();
+        params.set('limit', auditPageSize);
+        params.set('offset', auditPage * auditPageSize);
+        
+        const commandType = document.getElementById('filter-commandType').value;
+        const entityType = document.getElementById('filter-entityType').value;
+        const worldInstanceId = document.getElementById('filter-worldInstanceId').value;
+        const success = document.getElementById('filter-success').value;
+        
+        if (commandType) params.set('commandType', commandType);
+        if (entityType) params.set('entityType', entityType);
+        if (worldInstanceId) params.set('worldInstanceId', worldInstanceId);
+        if (success) params.set('success', success);
+        
+        const res = await fetch('/audit/logs?' + params.toString());
+        const data = await res.json();
+        
+        const tbody = document.getElementById('audit-logs-tbody');
+        if (data.logs && data.logs.length > 0) {
+          tbody.innerHTML = data.logs.map(log => {
+            const date = new Date(log.timestamp);
+            const statusClass = log.success ? 'high' : 'low';
+            return '<tr><td style="font-size: 0.8rem;">' + date.toLocaleString() + '</td><td>' + log.commandType + '</td><td>' + (log.entityType || '—') + '</td><td style="font-size: 0.75rem; max-width: 100px; overflow: hidden; text-overflow: ellipsis;">' + (log.entityId || '—') + '</td><td style="font-size: 0.75rem; max-width: 120px; overflow: hidden; text-overflow: ellipsis;">' + (log.worldInstanceId || '—') + '</td><td class="' + statusClass + '">' + (log.success ? '✓' : '✗') + '</td><td>' + (log.durationMs || 0) + 'ms</td><td><button onclick="showLogDetail(\'' + log.id + '\')" style="background: #3b82f6; color: white; border: none; padding: 4px 8px; border-radius: 3px; cursor: pointer; font-size: 0.7rem;">View</button></td></tr>';
+          }).join('');
+        } else {
+          tbody.innerHTML = '<tr><td colspan="8" style="text-align: center; color: #94a3b8;">No commands logged</td></tr>';
+        }
+        
+        const total = data.total || 0;
+        const start = auditPage * auditPageSize + 1;
+        const end = Math.min((auditPage + 1) * auditPageSize, total);
+        document.getElementById('audit-pagination-info').textContent = total > 0 ? 'Showing ' + start + '-' + end + ' of ' + total.toLocaleString() : 'No results';
+        
+        document.getElementById('audit-prev-btn').disabled = auditPage === 0;
+        document.getElementById('audit-next-btn').disabled = end >= total;
+      } catch (error) {
+        console.error('Failed to load audit logs:', error);
+      }
+    }
+    
+    async function loadAuditStats() {
+      try {
+        const res = await fetch('/audit/stats');
+        const stats = await res.json();
+        
+        document.getElementById('audit-total').textContent = stats.total?.toLocaleString() || '0';
+        document.getElementById('audit-errors').textContent = stats.errors?.toLocaleString() || '0';
+        document.getElementById('audit-error-rate').textContent = stats.errorRate + '% error rate';
+        document.getElementById('audit-archived').textContent = stats.archiver?.commandsArchived?.toLocaleString() || '0';
+        document.getElementById('audit-stream-length').textContent = stats.streamLength?.toLocaleString() || '0';
+      } catch (error) {
+        console.error('Failed to load audit stats:', error);
+      }
+    }
+    
+    async function showLogDetail(id) {
+      try {
+        const res = await fetch('/audit/logs/' + id);
+        const log = await res.json();
+        
+        const content = document.getElementById('log-detail-content');
+        content.innerHTML = '<div style="margin-bottom: 15px;"><strong>Command:</strong> ' + log.commandType + '</div>' +
+          '<div style="margin-bottom: 15px;"><strong>Entity:</strong> ' + (log.entityType || '—') + ' / ' + (log.entityId || '—') + '</div>' +
+          '<div style="margin-bottom: 15px;"><strong>World Instance:</strong> ' + (log.worldInstanceId || '—') + '</div>' +
+          '<div style="margin-bottom: 15px;"><strong>Status:</strong> ' + (log.success ? 'Success' : 'Failed') + '</div>' +
+          '<div style="margin-bottom: 15px;"><strong>Duration:</strong> ' + (log.durationMs || 0) + 'ms</div>' +
+          (log.errorMessage ? '<div style="margin-bottom: 15px; color: #ef4444;"><strong>Error:</strong> ' + log.errorMessage + '</div>' : '') +
+          '<h4 style="margin-top: 20px; margin-bottom: 10px;">Input Data</h4>' +
+          '<pre style="background: #0f172a; padding: 10px; border-radius: 4px; overflow-x: auto; font-size: 0.75rem; max-height: 200px;">' + JSON.stringify(log.inputData, null, 2) + '</pre>' +
+          '<h4 style="margin-top: 15px; margin-bottom: 10px;">Output Data</h4>' +
+          '<pre style="background: #0f172a; padding: 10px; border-radius: 4px; overflow-x: auto; font-size: 0.75rem; max-height: 200px;">' + JSON.stringify(log.outputData, null, 2) + '</pre>';
+        
+        document.getElementById('logDetailModal').style.display = 'block';
+      } catch (error) {
+        console.error('Failed to load log detail:', error);
+      }
+    }
+    
+    function closeLogDetailModal() {
+      document.getElementById('logDetailModal').style.display = 'none';
+    }
+    
+    function applyAuditFilters() {
+      auditPage = 0;
+      loadAuditLogs();
+      loadAuditBreakdown();
+    }
+    
+    function clearAuditFilters() {
+      document.getElementById('filter-commandType').value = '';
+      document.getElementById('filter-entityType').value = '';
+      document.getElementById('filter-worldInstanceId').value = '';
+      document.getElementById('filter-success').value = '';
+      applyAuditFilters();
+    }
+    
+    function prevAuditPage() {
+      if (auditPage > 0) {
+        auditPage--;
+        loadAuditLogs();
+      }
+    }
+    
+    function nextAuditPage() {
+      auditPage++;
+      loadAuditLogs();
+    }
+    
     loadBackupData();
+    loadAuditStats();
+    loadAuditFilters();
+    loadAuditBreakdown();
+    loadAuditLogs();
   </script>
 </body>
 </html>

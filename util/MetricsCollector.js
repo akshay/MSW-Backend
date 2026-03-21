@@ -111,6 +111,14 @@ export class MetricsCollector {
       clientMetrics: {
         byGroup: {},
         total: 0
+      },
+
+      audit: {
+        logged: 0,
+        archived: 0,
+        byCommandType: {},
+        errors: 0,
+        archiveRuns: 0
       }
     };
 
@@ -804,6 +812,33 @@ export class MetricsCollector {
     };
   }
 
+  recordAuditBatch(count) {
+    this.metrics.audit.logged += count;
+  }
+
+  recordAuditArchive(count, durationMs) {
+    this.metrics.audit.archived += count;
+    this.metrics.audit.archiveRuns++;
+  }
+
+  recordAuditError() {
+    this.metrics.audit.errors++;
+  }
+
+  getAuditSummary() {
+    const audit = this.metrics.audit;
+    return {
+      logged: audit.logged,
+      archived: audit.archived,
+      errors: audit.errors,
+      archiveRuns: audit.archiveRuns,
+      byCommandType: Object.entries(audit.byCommandType).map(([type, count]) => ({
+        type,
+        count
+      }))
+    };
+  }
+
   // Reset all metrics (useful for testing)
   reset() {
     const startTime = this.metrics.system.startTime;
@@ -839,6 +874,13 @@ export class MetricsCollector {
       clientMetrics: {
         byGroup: {},
         total: 0
+      },
+      audit: {
+        logged: 0,
+        archived: 0,
+        byCommandType: {},
+        errors: 0,
+        archiveRuns: 0
       }
     };
   }

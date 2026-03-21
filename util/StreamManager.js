@@ -80,7 +80,10 @@ export class StreamManager {
     // Group by stream ID for efficiency
     const streamGroups = streamCommands.reduce((groups, cmd) => {
       cmd.streamId = `${cmd.environment}:entity:${cmd.entityType}:${cmd.worldId}:${cmd.entityId}`;
-      (groups[cmd.streamId] = groups[cmd.streamId] || []).push(cmd);
+      if (!groups[cmd.streamId]) {
+        groups[cmd.streamId] = [];
+      }
+      groups[cmd.streamId].push(cmd);
       return groups;
     }, {});
 

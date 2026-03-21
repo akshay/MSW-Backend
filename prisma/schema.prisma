@@ -40,3 +40,39 @@ model Entity {
 
   @@map("entities")
 }
+
+model AuditLog {
+  id              String   @id @default(uuid()) @db.Text
+  timestamp       DateTime @default(now())
+  
+  worldInstanceId String?  @map("world_instance_id") @db.Text
+  clientIp        String?  @map("client_ip") @db.Text
+  environment     String?  @db.Text
+  
+  commandType     String   @map("command_type") @db.Text
+  commandIndex    Int      @map("command_index")
+  
+  entityType      String?  @map("entity_type") @db.Text
+  entityId        String?  @map("entity_id") @db.Text
+  worldId         Int?     @map("world_id")
+  
+  inputData       Json?    @map("input_data")
+  outputData      Json?    @map("output_data")
+  
+  statusCode      Int      @map("status_code")
+  durationMs      Int      @map("duration_ms")
+  success         Boolean  @default(true)
+  errorMessage    String?  @map("error_message") @db.Text
+  
+  method          String   @db.Text
+  path            String   @db.Text
+  
+  @@index([timestamp])
+  @@index([commandType, timestamp])
+  @@index([entityType, timestamp])
+  @@index([worldInstanceId, timestamp])
+  @@index([environment, timestamp])
+  @@index([success, timestamp])
+  
+  @@map("audit_logs")
+}

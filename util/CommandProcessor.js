@@ -9,9 +9,11 @@ import { EphemeralEntityManager } from './EphemeralEntityManager.js';
 import { PersistentEntityManager } from './PersistentEntityManager.js';
 import { BackgroundPersistenceTask } from './BackgroundPersistenceTask.js';
 import { BackblazeFileManager } from './BackblazeFileManager.js';
+import { S3FileManager } from './S3FileManager.js';
 import { metrics } from './MetricsCollector.js';
 import { PresenceManager } from './PresenceManager.js';
 import { buildCloudSearchResult, buildCloudTopResult, decodeCloudSaveMessage } from './CloudRunnerContract.js';
+import { auditLogger } from './AuditLogger.js';
 
 function createValidationError(message, statusCode = 400, details = null) {
   const error = new Error(message);
@@ -57,7 +59,11 @@ export class CommandProcessor {
 
     // Initialize Backblaze file manager if enabled
     this.fileManager = null;
-    if (config.backblaze.enabled && config.backblaze.keyId && config.backblaze.key) {
+    
+    // Prefer S3-compatible storage if endpoint is configured
+    if (config.s3.enabled && config.s3.endpoint && config.s3.accessKeyId) {
+      this.fileManager = new S3FileManager(config.s3);
+    } else if (config.backblaze.enabled && config.backblaze.keyId && config.backblaze.key) {
       this.fileManager = new BackblazeFileManager(config.backblaze);
     }
 
@@ -138,6 +144,13 @@ export class CommandProcessor {
 
   async processCommands(payload) {
     const startTime = performance.now();
+    
+    const requestContext = {
+      worldInstanceId: payload.worldInstanceId,
+      environment: payload.environment,
+      method: 'POST',
+      path: '/cloudrun'
+    };
 
     try {
       // Track world instance request
@@ -231,6 +244,12 @@ export class CommandProcessor {
         }
       }
 
+      // Log commands to audit
+      requestContext.durationMs = processingTime;
+      auditLogger.logCommands(requestContext, commands, orderedResults, 200).catch(err => {
+        console.error('[CommandProcessor] Failed to log audit:', err);
+      });
+
       return response;
     } catch (error) {
       console.error('Command processing failed:', error);
@@ -238,6 +257,12 @@ export class CommandProcessor {
       // Record error metric
       const duration = performance.now() - startTime;
       metrics.recordCommand('unknown', false, duration, payload.worldInstanceId);
+
+      // Log failed request to audit
+      requestContext.durationMs = duration;
+      auditLogger.logFailedRequest(requestContext, error, error.statusCode || 500).catch(err => {
+        console.error('[CommandProcessor] Failed to log failed audit:', err);
+      });
 
       throw error;
     }
