@@ -29,7 +29,8 @@
     "docker:clean": "docker-compose down -v",
     "docker:rebuild": "docker-compose build --no-cache && docker-compose up -d",
     "docker:staging": "docker-compose -f docker-compose.yml -f docker-compose.staging.yml up -d",
-    "docker:prod": "docker-compose -f docker-compose.yml -f docker-compose.prod.yml up -d"
+    "docker:prod": "docker-compose -f docker-compose.yml -f docker-compose.prod.yml up -d",
+    "setup:staging": "bash scripts/setup-staging.sh"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.600.0",

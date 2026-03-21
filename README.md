@@ -40,7 +40,7 @@ npm start
 
 | Environment | RAM | Command | Platform |
 |-------------|-----|---------|----------|
-| Staging | 4 GB | `npm run docker:staging` | Old laptop/desktop |
+| Staging | 4 GB | `npm run setup:staging` | Old laptop/desktop (one-command setup) |
 | Production | 8 GB+ | `npm run docker:prod` | Hetzner CCX13 |
 
 **For detailed deployment instructions, see [DEPLOYMENT.md](./DEPLOYMENT.md)**

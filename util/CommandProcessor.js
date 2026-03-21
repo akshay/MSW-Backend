@@ -119,17 +119,13 @@ export class CommandProcessor {
         throw new Error('SENDER_PUBLIC_KEY and RECIPIENT_PRIVATE_KEY environment variables are required');
       }
 
-      // Store for auth validation
       this.expectedAuth = senderPublicKey;
 
-      // Convert base64 keys to Uint8Array for NaCl
       this.senderPublicKeyBytes = decodeBase64(senderPublicKey);
       this.recipientPrivateKeyBytes = decodeBase64(recipientPrivateKey);
 
-      // Precompute the shared secret for NaCl Box decryption
       this.sharedSecret = box_before(this.senderPublicKeyBytes, this.recipientPrivateKeyBytes);
 
-      //console.log('NaCl decryption initialized successfully');
     } catch (error) {
       console.error('Failed to initialize NaCl decryption:', error);
       throw error;
@@ -275,12 +271,10 @@ export class CommandProcessor {
       throw createValidationError('worldInstanceId is required');
     }
 
-    // 1. Validate auth matches expected public key
     if (auth !== this.expectedAuth) {
       throw createValidationError('Authentication failed: invalid auth token', 401);
     }
 
-    // 2. Validate encrypted string
     if (!encrypted) {
       throw createValidationError('Invalid encrypted string: must be provided');
     }

@@ -4,7 +4,7 @@
 
 | Environment | RAM | Command | Recommended Platform |
 |-------------|-----|---------|---------------------|
-| Staging | 4 GB | `npm run docker:staging` | Old laptop/desktop |
+| Staging | 4 GB | `npm run setup:staging` | Old laptop/desktop (one-command) |
 | Production | 8 GB+ | `npm run docker:prod` | Hetzner CCX13 |
 
 ---
@@ -15,7 +15,35 @@
 
 Any computer with 4GB+ RAM works.
 
-#### Setup
+#### One-Command Setup
+
+```bash
+# Clone and run setup script
+git clone <your-repo-url>
+cd MSW-Backend
+npm run setup:staging
+```
+
+This will:
+1. Install Docker (if needed)
+2. Install Cloudflare Tunnel
+3. Generate auth keys and add to .env
+4. Start all services
+5. Generate a public URL via Cloudflare Tunnel
+6. Output client keys for game client
+
+**After setup, update your game client with:**
+- The Cloudflare Tunnel URL (e.g., `https://random.trycloudflare.com`)
+- The client keys output by the script
+
+**Prerequisites**: 
+- macOS or Linux
+- 4GB+ RAM
+- Internet connection
+
+#### Manual Setup
+
+If you prefer manual setup:
 
 ```bash
 # Install Docker
