@@ -1,0 +1,30 @@
+# Docker Compose for Production (8GB+ RAM)
+# Use: npm run docker:prod
+# Suitable for: Hetzner CPX31, CCX13, CPX41
+
+version: '3.8'
+
+services:
+  postgres:
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+
+  redis-cache:
+    command: redis-server --maxmemory 256mb --maxmemory-policy volatile-ttl
+
+  redis-ephemeral:
+    command: redis-server --maxmemory 1gb --maxmemory-policy allkeys-lru
+
+  redis-stream:
+    command: redis-server --maxmemory 128mb --maxmemory-policy allkeys-lru
+
+  redis-audit:
+    command: redis-server --maxmemory 1gb --maxmemory-policy allkeys-lru
+
+  app:
+    deploy:
+      resources:
+        limits:
+          memory: 1G

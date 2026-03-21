@@ -34,6 +34,29 @@ npm start
 
 ---
 
+## Deployment
+
+### Quick Reference
+
+| Environment | RAM | Command | Platform |
+|-------------|-----|---------|----------|
+| Staging | 4 GB | `npm run docker:staging` | Old laptop/desktop |
+| Production | 8 GB+ | `npm run docker:prod` | Hetzner CCX13 |
+
+**For detailed deployment instructions, see [DEPLOYMENT.md](./DEPLOYMENT.md)**
+
+### Cost Comparison
+
+| Option | RAM | Storage | Price | Best For |
+|--------|-----|---------|-------|----------|
+| Old laptop/desktop | 4 GB+ | varies | €0/mo | Staging |
+| Hetzner CPX31 | 8 GB | 160 GB | €14.20/mo | Production |
+| Hetzner CCX13 | 8 GB (dedicated) | 160 GB | €23.40/mo | Production |
+
+**For detailed deployment instructions, see [DEPLOYMENT.md](./DEPLOYMENT.md)**
+
+---
+
 ## Docker Commands
 
 | Command | Description |
@@ -213,9 +236,9 @@ npm run db:studio
 
 ## Storage Operations
 
-### MinIO Console (Local)
+### MinIO Console
 
-1. Open `http://localhost:9001`
+1. Open `http://<server>:9001`
 2. Login: `msw_access_key` / `msw_secret_key`
 3. Buckets: `staging`, `production`, `backups`
 
@@ -250,6 +273,7 @@ Files are synced automatically from `configDir` to S3 buckets every 60 seconds.
 - [ ] Configure backup schedule
 - [ ] Review rate limiting settings
 - [ ] Generate new auth keys
+- [ ] Setup domain with HTTPS
 
 ---
 

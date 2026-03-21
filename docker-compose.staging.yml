@@ -1,0 +1,12 @@
+# Docker Compose for Staging (4GB RAM)
+# Use: npm run docker:staging
+# Suitable for: Oracle Cloud FREE, old laptop/desktop, Hetzner CPX21
+
+version: '3.8'
+
+services:
+  redis-ephemeral:
+    command: redis-server --maxmemory 512mb --maxmemory-policy allkeys-lru
+
+  redis-audit:
+    command: redis-server --maxmemory 256mb --maxmemory-policy allkeys-lru
