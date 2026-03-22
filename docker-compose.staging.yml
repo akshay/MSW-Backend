@@ -1,7 +1,3 @@
-# Docker Compose for Staging (4GB RAM)
-# Use: npm run docker:staging
-# Suitable for: Oracle Cloud FREE, old laptop/desktop, Hetzner CPX21
-
 version: '3.8'
 
 services:

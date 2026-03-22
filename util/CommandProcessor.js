@@ -10,6 +10,7 @@ import { PersistentEntityManager } from './PersistentEntityManager.js';
 import { BackgroundPersistenceTask } from './BackgroundPersistenceTask.js';
 import { BackblazeFileManager } from './BackblazeFileManager.js';
 import { S3FileManager } from './S3FileManager.js';
+import { LocalFileManager } from './LocalFileManager.js';
 import { metrics } from './MetricsCollector.js';
 import { PresenceManager } from './PresenceManager.js';
 import { buildCloudSearchResult, buildCloudTopResult, decodeCloudSaveMessage } from './CloudRunnerContract.js';
@@ -57,14 +58,18 @@ export class CommandProcessor {
       }
     );
 
-    // Initialize Backblaze file manager if enabled
-    this.fileManager = null;
+    // Initialize file managers
+    // LocalFileManager for staging (reads from local disk)
+    // S3FileManager for production (Backblaze)
+    this.localFileManager = null;
+    this.s3FileManager = null;
     
-    // Prefer S3-compatible storage if endpoint is configured
-    if (config.s3.enabled && config.s3.endpoint && config.s3.accessKeyId) {
-      this.fileManager = new S3FileManager(config.s3);
-    } else if (config.backblaze.enabled && config.backblaze.keyId && config.backblaze.key) {
-      this.fileManager = new BackblazeFileManager(config.backblaze);
+    if (config.configSync.enabled) {
+      this.localFileManager = new LocalFileManager(config.configSync);
+    }
+    
+    if (config.s3.enabled && config.s3.accessKeyId) {
+      this.s3FileManager = new S3FileManager(config.s3);
     }
 
     // Precompute decryption key from environment variables
@@ -79,16 +84,30 @@ export class CommandProcessor {
     this.backgroundTask.start();
     this.presenceManager.start();
 
-    // Initialize file manager if enabled
-    if (this.fileManager) {
+    if (this.localFileManager) {
       try {
-        await this.fileManager.initialize();
-        console.log('Backblaze file manager initialized successfully');
+        await this.localFileManager.initialize();
+        console.log('Local file manager initialized for staging');
       } catch (error) {
-        console.error('Failed to initialize Backblaze file manager:', error);
-        // Don't throw - file sync is optional
+        console.error('Failed to initialize local file manager:', error);
       }
     }
+
+    if (this.s3FileManager) {
+      try {
+        await this.s3FileManager.initialize();
+        console.log('S3 file manager initialized for production');
+      } catch (error) {
+        console.error('Failed to initialize S3 file manager:', error);
+      }
+    }
+  }
+
+  getFileManager(environment) {
+    if (environment === 'production' && this.s3FileManager) {
+      return this.s3FileManager;
+    }
+    return this.localFileManager;
   }
 
   async stopBackgroundTasks() {
@@ -101,8 +120,12 @@ export class CommandProcessor {
       this.presenceManager.stop();
     }
 
-    if (this.fileManager) {
-      await this.fileManager.shutdown();
+    if (this.localFileManager) {
+      await this.localFileManager.shutdown();
+    }
+
+    if (this.s3FileManager) {
+      await this.s3FileManager.shutdown();
     }
   }
 
@@ -224,7 +247,8 @@ export class CommandProcessor {
         response.playerPopulation = this.presenceManager.getEmptySnapshot();
       }
 
-      if (this.fileManager && payload.files) {
+      const fileManager = this.getFileManager(environment);
+      if (fileManager && payload.files) {
         const fileSyncData = await this.processFileSync(
           environment,
           payload.files,
@@ -756,9 +780,14 @@ export class CommandProcessor {
       fileDownloads: null,
     };
 
+    const fileManager = this.getFileManager(environment);
+    if (!fileManager) {
+      return result;
+    }
+
     try {
       // Step 1: Validate file hashes and identify mismatches
-      const mismatches = this.fileManager.validateFileHashes(environment, fileHashes);
+      const mismatches = fileManager.validateFileHashes ? fileManager.validateFileHashes(environment, fileHashes) : {};
 
       if (Object.keys(mismatches).length > 0) {
         result.fileMismatches = mismatches;
@@ -780,7 +809,7 @@ export class CommandProcessor {
           }
 
           // Validate that the hash matches the current file version
-          const cachedFile = this.fileManager.getFile(environment, fileName);
+          const cachedFile = await fileManager.getFile(environment, fileName);
 
           if (!cachedFile) {
             // File not found
@@ -804,7 +833,7 @@ export class CommandProcessor {
           const offset = downloadInfo.bytesReceived || 0;
 
           // Get file chunk with bandwidth limit
-          const chunkData = this.fileManager.getFileChunk(
+          const chunkData = await fileManager.getFileChunk(
             environment,
             fileName,
             offset,
@@ -858,7 +887,14 @@ export class CommandProcessor {
   /**
    * Get file manager stats
    */
-  getFileSyncStats() {
-    return this.fileManager ? this.fileManager.getStats() : null;
+  getFileSyncStats(environment = null) {
+    if (environment) {
+      const fileManager = this.getFileManager(environment);
+      return fileManager ? fileManager.getStats() : null;
+    }
+    return {
+      staging: this.localFileManager ? this.localFileManager.getStats() : null,
+      production: this.s3FileManager ? this.s3FileManager.getStats() : null,
+    };
   }
 }
